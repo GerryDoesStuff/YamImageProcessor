@@ -187,7 +187,7 @@ Module authors should:
 * Cloud-based processing interface.
 * Plugin marketplace.
 * Support for 3D and hyperspectral images.
-
+* App integration into a wider app network (i.e., taking images from a microscopy app for more in-depth processing).
 ---
 
 ### 18. Directory Structure
@@ -208,3 +208,5 @@ microscopic_app/
 ### 19. Summary
 
 The MMIPA architecture balances modularity, reproducibility, and performance while maintaining usability and security. It provides a foundation for building specialized microscopy tools and advanced analytical extensions with minimal rework.
+
+Note to agent - use the extraction, prprocessing, and segmentation Python scripts as examples of what minimal functionality needs to be implemented in the app
