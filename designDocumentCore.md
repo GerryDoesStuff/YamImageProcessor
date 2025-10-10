@@ -134,6 +134,7 @@ Module authors should:
 * High-contrast themes.
 * Scalable icons and fonts.
 * Language packs via Qt translation files.
+* All input fields must have tooltips describing their expected effect and recommended value range.
 
 ---
 
