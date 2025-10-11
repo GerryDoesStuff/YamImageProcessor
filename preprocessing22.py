@@ -34,12 +34,13 @@ both the processed image and the pipeline order. The current pipeline is shown b
 """
 
 import sys, os, json, logging
-from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Tuple, Dict
 
 import cv2, numpy as np
 from skimage import io
 from PyQt5 import QtWidgets, QtCore, QtGui
+
+from yam_processor.processing import PipelineManager, PipelineStep
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -165,32 +166,12 @@ class Preprocessor:
 # 3. PIPELINE (Extraction‑Style with Order)
 #####################################
 
-@dataclass
-class PipelineStep:
-    name: str
-    function: Callable[[np.ndarray, Dict[str, Any]], np.ndarray]
-    enabled: bool = True
-    params: Dict[str, Any] = field(default_factory=dict)
 
-    def apply(self, image: np.ndarray) -> np.ndarray:
-        if not self.enabled:
-            logging.debug(f"Skipping disabled step: {self.name}")
-            return image
-        logging.debug(f"Applying step: {self.name} with params: {self.params}")
-        return self.function(image, **self.params)
+class PreprocessingPipeline(PipelineManager):
+    """Thin wrapper retaining the historical name used in the UI code."""
 
-class PreprocessingPipeline:
     def __init__(self):
-        self.steps: List[PipelineStep] = []
-    def add_step(self, step: PipelineStep):
-        self.steps.append(step)
-    def clear_steps(self):
-        self.steps = []
-    def apply(self, image: np.ndarray) -> np.ndarray:
-        processed = image.copy()
-        for step in self.steps:
-            processed = step.apply(processed)
-        return processed
+        super().__init__()
 
 def get_settings_dict(settings: QtCore.QSettings) -> dict:
     d = {}
@@ -205,49 +186,55 @@ def build_preprocessing_pipeline_from_dict(settings_dict: dict) -> Preprocessing
     for step in order:
         if step == "Grayscale":
             enabled = parse_bool(settings_dict.get("preprocess/grayscale", False))
-            func = lambda img: Preprocessor.to_grayscale(img)
             params = {}
+            func = Preprocessor.to_grayscale
         elif step == "BrightnessContrast":
             enabled = parse_bool(settings_dict.get("preprocess/brightness_contrast/enabled", False))
             alpha = float(settings_dict.get("preprocess/brightness_contrast/alpha", 1.0))
             beta = int(settings_dict.get("preprocess/brightness_contrast/beta", 0))
-            func = lambda img, alpha, beta: Preprocessor.adjust_contrast_brightness(img, alpha, beta)
             params = {"alpha": alpha, "beta": beta}
+            func = Preprocessor.adjust_contrast_brightness
         elif step == "Gamma":
             enabled = parse_bool(settings_dict.get("preprocess/gamma/enabled", False))
             gamma_val = float(settings_dict.get("preprocess/gamma/value", 1.0))
-            func = lambda img, gamma: Preprocessor.adjust_gamma(img, gamma)
             params = {"gamma": gamma_val}
+            func = Preprocessor.adjust_gamma
         elif step == "IntensityNormalization":
             enabled = parse_bool(settings_dict.get("preprocess/normalize/enabled", False))
             norm_alpha = int(settings_dict.get("preprocess/normalize/alpha", 0))
             norm_beta = int(settings_dict.get("preprocess/normalize/beta", 255))
-            func = lambda img, alpha, beta: Preprocessor.normalize_intensity(img, alpha, beta)
             params = {"alpha": norm_alpha, "beta": norm_beta}
+            func = Preprocessor.normalize_intensity
         elif step == "NoiseReduction":
             enabled = parse_bool(settings_dict.get("preprocess/noise_reduction/enabled", False))
             method = settings_dict.get("preprocess/noise_reduction/method", "Gaussian")
             ksize = int(settings_dict.get("preprocess/noise_reduction/ksize", 5))
-            func = lambda img, method, ksize: Preprocessor.noise_reduction(img, method, ksize)
             params = {"method": method, "ksize": ksize}
+            func = Preprocessor.noise_reduction
         elif step == "Sharpen":
             enabled = parse_bool(settings_dict.get("preprocess/sharpen/enabled", False))
             strength = float(settings_dict.get("preprocess/sharpen/strength", 1.0))
-            func = lambda img, strength: Preprocessor.sharpen(img, strength)
             params = {"strength": strength}
+            func = Preprocessor.sharpen
         elif step == "SelectChannel":
             enabled = parse_bool(settings_dict.get("preprocess/select_channel/enabled", False))
             channel = settings_dict.get("preprocess/select_channel/value", "All")
-            func = lambda img, channel: Preprocessor.select_channel(img, channel)
             params = {"channel": channel}
+            func = Preprocessor.select_channel
         elif step == "Crop":
             enabled = parse_bool(settings_dict.get("preprocess/crop/enabled", False))
             x_offset = int(settings_dict.get("preprocess/crop/x_offset", 0))
             y_offset = int(settings_dict.get("preprocess/crop/y_offset", 0))
             width = int(settings_dict.get("preprocess/crop/width", 100))
             height = int(settings_dict.get("preprocess/crop/height", 100))
-            func = lambda img, x_offset, y_offset, width, height, apply_crop: Preprocessor.crop_image(img, x_offset, y_offset, width, height, apply_crop)
-            params = {"x_offset": x_offset, "y_offset": y_offset, "width": width, "height": height, "apply_crop": enabled}
+            params = {
+                "x_offset": x_offset,
+                "y_offset": y_offset,
+                "width": width,
+                "height": height,
+                "apply_crop": enabled,
+            }
+            func = Preprocessor.crop_image
         else:
             continue
         pipeline.add_step(PipelineStep(name=step, function=func, enabled=enabled, params=params))
