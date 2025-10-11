@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from .logging_config import LoggingConfigurator, LoggingOptions
-from .module_loader import ModuleLoader
+from .module_loader import ModuleLoader, ModuleRegistry
 from .settings_manager import SettingsManager
 from .threading import ThreadController
 
@@ -36,6 +36,7 @@ class AppCore:
         self.settings: Optional[SettingsManager] = None
         self.thread_controller: Optional[ThreadController] = None
         self.plugins: List[object] = []
+        self.module_registry: ModuleRegistry = ModuleRegistry()
 
     def bootstrap(self) -> None:
         """Initialise all core systems."""
