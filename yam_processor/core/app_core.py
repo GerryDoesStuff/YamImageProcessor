@@ -8,6 +8,7 @@ from typing import List, Optional, Sequence
 
 from .logging_config import LoggingConfigurator, LoggingOptions
 from .module_loader import ModuleLoader, ModuleRegistry
+from .persistence import AutosaveManager
 from .settings_manager import SettingsManager
 from .threading import ThreadController
 
@@ -24,6 +25,9 @@ class AppConfiguration:
     enable_console_logging: bool = True
     max_log_bytes: int = 5 * 1024 * 1024
     log_backup_count: int = 5
+    autosave_directory: Optional[Path] = None
+    autosave_interval_seconds: float = 120.0
+    autosave_backup_retention: int = 5
 
 
 class AppCore:
@@ -35,6 +39,7 @@ class AppCore:
         self.logging_configurator: Optional[LoggingConfigurator] = None
         self.settings: Optional[SettingsManager] = None
         self.thread_controller: Optional[ThreadController] = None
+        self.autosave_manager: Optional[AutosaveManager] = None
         self.plugins: List[object] = []
         self.module_registry: ModuleRegistry = ModuleRegistry()
 
@@ -43,6 +48,7 @@ class AppCore:
         self._init_logging()
         self.logger.info("Bootstrapping application core", extra={"component": "AppCore"})
         self._init_settings()
+        self._init_persistence()
         self._init_threading()
         self._discover_plugins()
 
@@ -50,6 +56,8 @@ class AppCore:
         """Shutdown routine for releasing resources gracefully."""
         if self.thread_controller is not None:
             self.thread_controller.shutdown()
+        if self.autosave_manager is not None:
+            self.autosave_manager.shutdown()
         self.logger.info("Application core shutdown complete", extra={"component": "AppCore"})
 
     def _init_logging(self) -> None:
@@ -67,6 +75,23 @@ class AppCore:
     def _init_settings(self) -> None:
         self.settings = SettingsManager(self.config.organization, self.config.application)
         self.logger.debug("Settings manager initialised", extra={"component": "AppCore"})
+
+    def _init_persistence(self) -> None:
+        autosave_dir = (
+            self.config.autosave_directory
+            or Path.home() / f".{self.config.application.lower()}" / "autosave"
+        )
+        autosave_logger = logging.getLogger(f"{__name__}.Autosave")
+        self.autosave_manager = AutosaveManager(
+            autosave_dir,
+            interval_seconds=self.config.autosave_interval_seconds,
+            backup_retention=self.config.autosave_backup_retention,
+            logger=autosave_logger,
+        )
+        self.logger.debug(
+            "Autosave manager initialised",
+            extra={"component": "AppCore", "autosave_dir": str(autosave_dir)},
+        )
 
     def _init_threading(self) -> None:
         self.thread_controller = ThreadController()

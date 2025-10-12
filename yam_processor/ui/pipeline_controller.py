@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Sequence
 
 import numpy as np
 
@@ -12,6 +12,9 @@ from PyQt5 import QtWidgets  # type: ignore
 
 from yam_processor.data import ImageRecord, load_image, save_image
 from yam_processor.processing import PipelineManager, PipelineStep
+
+if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
+    from yam_processor.core.persistence import AutosaveManager
 
 from .dialogs import ParameterDialog, ParameterSpec
 
@@ -22,10 +25,16 @@ LOGGER = logging.getLogger(__name__)
 class PipelineController:
     """Coordinates rebuild, toggling, and history actions for a pipeline."""
 
-    def __init__(self, builder: Callable[[], PipelineManager]) -> None:
+    def __init__(
+        self,
+        builder: Callable[[], PipelineManager],
+        *,
+        autosave_manager: Optional["AutosaveManager"] = None,
+    ) -> None:
         self._builder = builder
         self.manager: PipelineManager = builder()
         self._open_dialogs: list[ParameterDialog] = []
+        self._autosave_manager: Optional["AutosaveManager"] = autosave_manager
         LOGGER.debug("PipelineController initialised with steps: %s", self.manager.get_order())
 
     def rebuild_pipeline(self) -> PipelineManager:
@@ -33,6 +42,7 @@ class PipelineController:
 
         self.manager = self._builder()
         LOGGER.debug("Pipeline rebuilt with steps: %s", self.manager.get_order())
+        self._mark_pipeline_dirty({"action": "rebuild"})
         return self.manager
 
     # ------------------------------------------------------------------
@@ -116,12 +126,15 @@ class PipelineController:
     # ------------------------------------------------------------------
     def enable_step(self, identifier: int | str) -> None:
         self.manager.set_step_enabled(identifier, True)
+        self._mark_pipeline_dirty({"action": "enable", "identifier": identifier})
 
     def disable_step(self, identifier: int | str) -> None:
         self.manager.set_step_enabled(identifier, False)
+        self._mark_pipeline_dirty({"action": "disable", "identifier": identifier})
 
     def toggle_step(self, identifier: int | str) -> None:
         self.manager.toggle_step(identifier)
+        self._mark_pipeline_dirty({"action": "toggle", "identifier": identifier})
 
     # ------------------------------------------------------------------
     # History helpers
@@ -136,6 +149,7 @@ class PipelineController:
             LOGGER.debug("Undo requested but no state available")
             return None
         LOGGER.info("Undo restored pipeline order: %s", [step.name for step in entry.steps])
+        self._mark_pipeline_dirty({"action": "undo"})
         return entry.output
 
     def redo(self, current_output: Optional[np.ndarray]) -> Optional[np.ndarray]:
@@ -144,6 +158,7 @@ class PipelineController:
             LOGGER.debug("Redo requested but no state available")
             return None
         LOGGER.info("Redo restored pipeline order: %s", [step.name for step in entry.steps])
+        self._mark_pipeline_dirty({"action": "redo"})
         return entry.output
 
     # ------------------------------------------------------------------
@@ -188,6 +203,7 @@ class PipelineController:
     def _update_step_params(self, step: PipelineStep, params: Dict[str, Any]) -> None:
         step.params.clear()
         step.params.update(params)
+        self._mark_pipeline_dirty({"action": "update_params", "step": step.name})
 
     def _on_dialog_cancelled(self, step: PipelineStep, params: Dict[str, Any]) -> None:
         self._update_step_params(step, params)
@@ -197,4 +213,39 @@ class PipelineController:
             self._open_dialogs.remove(dialog)
         except ValueError:
             pass
+
+    # ------------------------------------------------------------------
+    # Persistence helpers
+    # ------------------------------------------------------------------
+    def set_autosave_manager(self, manager: Optional["AutosaveManager"]) -> None:
+        self._autosave_manager = manager
+
+    def save_project(
+        self, destination: Optional[Path | str], *, metadata: Optional[Dict[str, Any]] = None
+    ) -> Path:
+        if self._autosave_manager is None:
+            raise RuntimeError("Autosave manager has not been configured")
+
+        payload = self.manager.to_dict()
+        combined_metadata = self._build_metadata(metadata)
+        return self._autosave_manager.save(destination, pipeline=payload, metadata=combined_metadata)
+
+    def _mark_pipeline_dirty(self, extra_metadata: Optional[Dict[str, Any]] = None) -> None:
+        if self._autosave_manager is None:
+            return
+        payload = self.manager.to_dict()
+        metadata = self._build_metadata(extra_metadata)
+        try:
+            self._autosave_manager.mark_dirty(payload, metadata)
+        except Exception as exc:  # pragma: no cover - autosave failures should not crash UI
+            LOGGER.error("Failed to schedule autosave", exc_info=exc)
+
+    def _build_metadata(self, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {
+            "stepCount": len(self.manager.steps),
+            "steps": self.manager.get_order(),
+        }
+        if extra:
+            metadata.update(extra)
+        return metadata
 
