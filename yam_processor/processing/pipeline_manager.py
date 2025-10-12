@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import base64
 import copy
+import datetime as _dt
 import io
 import logging
 import os
 import tempfile
+import traceback
+import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 import numpy as np
@@ -294,6 +298,8 @@ class PipelineManager:
         self._undo_stack: List[PipelineHistoryEntry] = []
         self._redo_stack: List[PipelineHistoryEntry] = []
         self._last_execution_entry: Optional[PipelineHistoryEntry] = None
+        self._recovery_root = Path(tempfile.gettempdir()) / "yam_processor" / "recovery"
+        self._last_failure: Optional[PipelineFailure] = None
 
     # ------------------------------------------------------------------
     # Step management helpers
@@ -459,8 +465,26 @@ class PipelineManager:
 
         processed = image.copy()
         intermediates: Dict[str, CachedArray] = {}
+        self._last_failure = None
         for step in self.steps:
-            processed = step.apply(processed)
+            try:
+                processed = step.apply(processed)
+            except Exception as exc:
+                traceback_text = traceback.format_exc()
+                recovery_path = self._write_recovery_trace(step.name, traceback_text)
+                step.enabled = False
+                failure = PipelineFailure(step.name, exc, traceback_text, recovery_path)
+                self._last_failure = failure
+                LOGGER.error(
+                    "Pipeline step failed",
+                    exc_info=exc,
+                    extra={
+                        "step": step.name,
+                        "recovery_path": str(recovery_path),
+                    },
+                )
+                raise PipelineExecutionError(failure) from exc
+
             intermediates[step.name] = CachedArray.from_array(
                 processed,
                 threshold_bytes=cache_threshold_bytes,
@@ -478,6 +502,20 @@ class PipelineManager:
         )
         self._last_execution_entry = entry.clone()
         return processed
+
+    def last_failure(self) -> Optional[PipelineFailure]:
+        """Return the most recent pipeline failure, if any."""
+
+        return self._last_failure
+
+    def _write_recovery_trace(self, step_name: str, traceback_text: str) -> Path:
+        timestamp = _dt.datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in step_name)
+        recovery_dir = self._recovery_root / f"{timestamp}_{safe_name}_{uuid.uuid4().hex[:8]}"
+        recovery_dir.mkdir(parents=True, exist_ok=True)
+        trace_path = recovery_dir / "traceback.txt"
+        trace_path.write_text(traceback_text, encoding="utf-8")
+        return trace_path
 
     def get_cached_output(self, step_name: str) -> Optional[np.ndarray]:
         """Return cached data for ``step_name`` from the latest application."""
@@ -557,4 +595,22 @@ class PipelineManager:
 
     def __iter__(self):  # pragma: no cover - container convenience
         return iter(self.steps)
+
+@dataclass
+class PipelineFailure:
+    """Report generated when a pipeline step fails during execution."""
+
+    step_name: str
+    exception: Exception
+    traceback: str
+    recovery_path: Path
+
+
+class PipelineExecutionError(RuntimeError):
+    """Error raised when a pipeline step cannot be executed successfully."""
+
+    def __init__(self, failure: PipelineFailure) -> None:
+        message = f"Pipeline step '{failure.step_name}' failed: {failure.exception}"
+        super().__init__(message)
+        self.failure = failure
 

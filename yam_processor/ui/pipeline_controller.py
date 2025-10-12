@@ -87,12 +87,21 @@ class PipelineController:
         step = self.manager.get_step(identifier)
         schema = self._resolve_schema(step)
         preview_callable = self._resolve_preview_callable(step)
+        error_metadata = {"step": step.name}
+        module = getattr(step.function, "__self__", None)
+        if module is not None:
+            error_metadata["module"] = module.__class__.__name__
+            module_metadata = getattr(module, "metadata", None)
+            module_name = getattr(module_metadata, "name", None)
+            if module_name:
+                error_metadata["moduleName"] = module_name
 
         dialog = ParameterDialog(
             schema=schema,
             preview_callback=preview_callable,
             parent=parent,
             window_title=f"{step.name} Parameters",
+            error_metadata=error_metadata,
         )
         dialog.set_parameters(step.params)
         if source_image is not None:
@@ -103,6 +112,7 @@ class PipelineController:
         dialog.cancelled.connect(lambda step=step, params=initial_params: self._on_dialog_cancelled(step, params))
         dialog.finished.connect(lambda _result, dlg=dialog: self._untrack_dialog(dlg))
         dialog.destroyed.connect(lambda _obj=None, dlg=dialog: self._untrack_dialog(dlg))
+        dialog.errorOccurred.connect(self._on_dialog_error)
         self._open_dialogs.append(dialog)
         return dialog
 
@@ -213,6 +223,11 @@ class PipelineController:
             self._open_dialogs.remove(dialog)
         except ValueError:
             pass
+
+    def _on_dialog_error(self, operation: str, payload: dict) -> None:
+        context = dict(payload)
+        context.setdefault("operation", operation)
+        LOGGER.error("Parameter dialog error", extra={"dialog_error": context})
 
     # ------------------------------------------------------------------
     # Persistence helpers

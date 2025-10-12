@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import traceback
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
@@ -9,6 +10,7 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets  # type: ignore
 
+from .error_dialog import ErrorDialog
 from .tooltips import format_parameter_tooltip
 
 
@@ -141,7 +143,7 @@ class PreviewWidget(QtWidgets.QWidget):
 
 class _PreviewWorkerSignals(QtCore.QObject):
     finished = QtCore.pyqtSignal(object)
-    failed = QtCore.pyqtSignal(Exception)
+    failed = QtCore.pyqtSignal(Exception, str)
 
 
 class _PreviewRunnable(QtCore.QRunnable):
@@ -161,7 +163,7 @@ class _PreviewRunnable(QtCore.QRunnable):
         try:
             result = self.preview_callable(self.image, self.params)
         except Exception as exc:  # pragma: no cover - Qt threading
-            self.signals.failed.emit(exc)
+            self.signals.failed.emit(exc, traceback.format_exc())
             return
         self.signals.finished.emit(result)
 
@@ -172,7 +174,8 @@ class ParameterDialog(QtWidgets.QDialog):
     cancelled = QtCore.pyqtSignal()
     parametersChanged = QtCore.pyqtSignal(dict)
     previewUpdated = QtCore.pyqtSignal(np.ndarray)
-    previewFailed = QtCore.pyqtSignal(Exception)
+    previewFailed = QtCore.pyqtSignal(Exception, str)
+    errorOccurred = QtCore.pyqtSignal(str, dict)
 
     def __init__(
         self,
@@ -181,6 +184,7 @@ class ParameterDialog(QtWidgets.QDialog):
         *,
         parent: Optional[QtWidgets.QWidget] = None,
         window_title: Optional[str] = None,
+        error_metadata: Optional[Mapping[str, Any]] = None,
     ) -> None:
         super().__init__(parent)
         self.setModal(False)
@@ -199,6 +203,7 @@ class ParameterDialog(QtWidgets.QDialog):
         self._preview_running = False
         self._pending_params: Optional[Dict[str, Any]] = None
         self._initial_parameters: Dict[str, Any] = {}
+        self._error_metadata: Dict[str, Any] = dict(error_metadata or {})
 
         self._build_ui()
         self.reset_to_defaults()
@@ -229,6 +234,11 @@ class ParameterDialog(QtWidgets.QDialog):
     def reset_to_defaults(self) -> None:
         defaults = {spec.name: spec.default for spec in self._schema}
         self._apply_parameters(defaults)
+
+    def set_error_metadata(self, metadata: Mapping[str, Any]) -> None:
+        """Update contextual metadata shown when displaying errors."""
+
+        self._error_metadata = dict(metadata)
 
     # ------------------------------------------------------------------
     # Qt event overrides
@@ -423,17 +433,41 @@ class ParameterDialog(QtWidgets.QDialog):
             self._pending_params = None
             self._start_preview(params)
 
-    @QtCore.pyqtSlot(Exception)
-    def _handle_preview_failed(self, error: Exception) -> None:  # pragma: no cover - Qt threading
+    @QtCore.pyqtSlot(Exception, str)
+    def _handle_preview_failed(
+        self, error: Exception, traceback_text: str
+    ) -> None:  # pragma: no cover - Qt threading
         self._preview_running = False
-        self.previewFailed.emit(error)
-        self._status_label.setText(
-            self.tr("Preview error: {error}").format(error=error)
+        self.previewFailed.emit(error, traceback_text)
+        message = self.tr("Preview error: {error}").format(error=error)
+        self._status_label.setText(message)
+        metadata = self._compose_error_metadata(
+            {
+                "operation": "preview",
+                "exceptionType": type(error).__name__,
+                "parameters": self._pending_params or self.parameters(),
+            }
         )
+        ErrorDialog.present(
+            message,
+            traceback_text,
+            parent=self,
+            metadata=metadata,
+            window_title=self.tr("Preview failure"),
+        )
+        log_payload = dict(metadata)
+        log_payload["traceback"] = traceback_text
+        self.errorOccurred.emit("preview", log_payload)
         if self._pending_params is not None:
             params = self._pending_params
             self._pending_params = None
             self._start_preview(params)
+
+    def _compose_error_metadata(self, extra: Mapping[str, Any]) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {"dialog": self.windowTitle()}
+        metadata.update(self._error_metadata)
+        metadata.update(extra)
+        return metadata
 
 
 __all__ = [
