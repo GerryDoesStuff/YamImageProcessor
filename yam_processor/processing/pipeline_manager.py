@@ -434,6 +434,11 @@ class PipelineManager:
     def can_redo(self) -> bool:
         return bool(self._redo_stack)
 
+    def history_depth(self) -> tuple[int, int]:
+        """Return the number of undo and redo states currently cached."""
+
+        return (len(self._undo_stack), len(self._redo_stack))
+
     # ------------------------------------------------------------------
     # Execution and serialisation helpers
     # ------------------------------------------------------------------

@@ -9,6 +9,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets  # type: ignore
 
 from .pipeline_controller import PipelineController
 from .resources import load_icon
+from .tooltips import build_main_window_tooltips
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -73,6 +74,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Bind the window to a :class:`PipelineController`."""
 
         self._pipeline_controller = controller
+        self._apply_action_tooltips()
 
     @QtCore.pyqtSlot(bool)
     def toggle_pipeline_dock(self, visible: bool) -> None:
@@ -231,6 +233,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view_menu.addAction(self.diagnostics_toggle_action)
 
         self._install_context_menus()
+        self._apply_action_tooltips()
 
     def _create_dock(
         self, title: str, placeholder_text: str, *, object_name: str
@@ -302,6 +305,47 @@ class MainWindow(QtWidgets.QMainWindow):
                 widget.addAction(separator)
             else:
                 widget.addAction(action)
+
+    def _apply_action_tooltips(self) -> None:
+        if not hasattr(self, "open_project_action"):
+            return
+
+        tooltips = build_main_window_tooltips(self._pipeline_controller)
+        action_mapping = {
+            "open_project": getattr(self, "open_project_action", None),
+            "save_project": getattr(self, "save_project_action", None),
+            "save_project_as": getattr(self, "save_project_as_action", None),
+            "exit": getattr(self, "exit_action", None),
+            "undo": getattr(self, "undo_action", None),
+            "redo": getattr(self, "redo_action", None),
+            "manage_modules": getattr(self, "manage_modules_action", None),
+            "documentation": getattr(self, "documentation_action", None),
+            "about": getattr(self, "about_action", None),
+            "pipeline_toggle": getattr(self, "pipeline_toggle_action", None),
+            "preview_toggle": getattr(self, "preview_toggle_action", None),
+            "diagnostics_toggle": getattr(self, "diagnostics_toggle_action", None),
+        }
+
+        for key, action in action_mapping.items():
+            if action is None:
+                continue
+            tooltip = tooltips.get(key)
+            if tooltip:
+                action.setToolTip(tooltip)
+                action.setWhatsThis(tooltip)
+
+        dock_mapping = {
+            "pipeline_toggle": getattr(self, "pipeline_dock", None),
+            "preview_toggle": getattr(self, "preview_dock", None),
+            "diagnostics_toggle": getattr(self, "diagnostics_dock", None),
+        }
+
+        for key, dock in dock_mapping.items():
+            if dock is None:
+                continue
+            tooltip = tooltips.get(key)
+            if tooltip:
+                dock.setToolTip(tooltip)
 
     def _on_screen_changed(self, screen: Optional[QtGui.QScreen]) -> None:
         self._apply_accessibility_preferences(screen)
@@ -470,6 +514,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._pipeline_controller is not None:
             result = self._pipeline_controller.undo(None)
         self.undoRequested.emit(result)
+        self._apply_action_tooltips()
 
     @QtCore.pyqtSlot()
     def _on_redo_requested(self) -> None:
@@ -477,6 +522,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._pipeline_controller is not None:
             result = self._pipeline_controller.redo(None)
         self.redoRequested.emit(result)
+        self._apply_action_tooltips()
 
 __all__ = ["MainWindow"]
 

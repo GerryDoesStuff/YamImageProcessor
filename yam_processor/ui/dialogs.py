@@ -9,6 +9,8 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets  # type: ignore
 
+from .tooltips import format_parameter_tooltip
+
 
 class ParameterType(Enum):
     """Supported control widget types for :class:`ParameterDialog`."""
@@ -39,29 +41,12 @@ class ParameterSpec:
 
     def tooltip(self) -> str:
         """Generate a descriptive tooltip including range and shortcuts."""
-
-        sections: list[str] = []
-        if self.description:
-            sections.append(self.description.strip())
-
-        if self.minimum is not None or self.maximum is not None:
-            lower = "-∞" if self.minimum is None else str(self.minimum)
-            upper = "∞" if self.maximum is None else str(self.maximum)
-            sections.append(
-                QtCore.QCoreApplication.translate(
-                    "ParameterSpec", "Valid range: {lower} – {upper}"
-                ).format(lower=lower, upper=upper)
-            )
-
-        if self.shortcuts:
-            shortcut_text = ", ".join(self.shortcuts)
-            sections.append(
-                QtCore.QCoreApplication.translate(
-                    "ParameterSpec", "Shortcuts: {shortcut_text}"
-                ).format(shortcut_text=shortcut_text)
-            )
-
-        return "\n\n".join(sections)
+        return format_parameter_tooltip(
+            description=self.description,
+            minimum=self.minimum,
+            maximum=self.maximum,
+            shortcuts=self.shortcuts,
+        )
 
 
 def _apply_parameter_metadata(widget: QtWidgets.QWidget, spec: ParameterSpec) -> None:
