@@ -2,15 +2,21 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence
 
 from PyQt5 import QtCore  # type: ignore
 
+from yam_processor.data import configure_allowed_roots
+
 from .logging_config import LoggingConfigurator, LoggingOptions
 from .module_loader import ModuleLoader, ModuleRegistry
 from .persistence import AutosaveManager
+from .recovery import RecoveryManager
 from .settings_manager import SettingsManager
 from .threading import ThreadController
 
@@ -30,6 +36,8 @@ class AppConfiguration:
     autosave_directory: Optional[Path] = None
     autosave_interval_seconds: float = 120.0
     autosave_backup_retention: int = 5
+    session_temp_parent: Optional[Path] = None
+    allowed_user_roots: Sequence[Path] = field(default_factory=lambda: [Path.home(), Path.cwd()])
     translation_directories: Sequence[Path] = field(
         default_factory=lambda: [Path(__file__).resolve().parents[1] / "i18n"]
     )
@@ -47,12 +55,16 @@ class AppCore:
         self.settings: Optional[SettingsManager] = None
         self.thread_controller: Optional[ThreadController] = None
         self.autosave_manager: Optional[AutosaveManager] = None
+        self.recovery_manager: Optional[RecoveryManager] = None
         self.plugins: List[object] = []
         self.module_registry: ModuleRegistry = ModuleRegistry()
         self.translators: list[QtCore.QTranslator] = []
+        self.session_temp_dir: Optional[Path] = None
 
     def bootstrap(self) -> None:
         """Initialise all core systems."""
+        self._init_session_temp_dir()
+        self._configure_user_paths()
         self._init_logging()
         self.logger.info("Bootstrapping application core", extra={"component": "AppCore"})
         self._init_settings()
@@ -67,7 +79,10 @@ class AppCore:
             self.thread_controller.shutdown()
         if self.autosave_manager is not None:
             self.autosave_manager.shutdown()
+        if self.recovery_manager is not None:
+            self.recovery_manager.cleanup_crash_markers()
         self._remove_translations()
+        self._teardown_session_temp_dir()
         self.logger.info("Application core shutdown complete", extra={"component": "AppCore"})
 
     def _init_logging(self) -> None:
@@ -85,6 +100,54 @@ class AppCore:
     def _init_settings(self) -> None:
         self.settings = SettingsManager(self.config.organization, self.config.application)
         self.logger.debug("Settings manager initialised", extra={"component": "AppCore"})
+
+    def _init_session_temp_dir(self) -> None:
+        if self.session_temp_dir is not None:
+            return
+        prefix = f"{self.config.application.lower()}_"
+        parent = self.config.session_temp_parent
+        dir_arg = os.fspath(parent) if parent is not None else None
+        path = Path(tempfile.mkdtemp(prefix=prefix, dir=dir_arg))
+        cache_dir = path / "pipeline_cache"
+        recovery_dir = path / "recovery"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        recovery_dir.mkdir(parents=True, exist_ok=True)
+        self.session_temp_dir = path
+        try:
+            from yam_processor.processing.pipeline_manager import PipelineManager
+
+            PipelineManager.set_default_cache_directory(cache_dir)
+            PipelineManager.set_default_recovery_root(recovery_dir)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.debug(
+                "Failed to configure pipeline cache directories", extra={"error": str(exc)}
+            )
+        self.logger.debug(
+            "Session temporary directory initialised",
+            extra={"component": "AppCore", "temp_dir": str(path)},
+        )
+
+    def _configure_user_paths(self) -> None:
+        roots = [Path(root).expanduser() for root in self.config.allowed_user_roots]
+        try:
+            configure_allowed_roots(roots)
+        except ValueError as exc:
+            self.logger.warning(
+                "Invalid allowed roots configuration", extra={"error": str(exc)}
+            )
+            configure_allowed_roots([Path.cwd()])
+
+    def _teardown_session_temp_dir(self) -> None:
+        if self.session_temp_dir is None:
+            return
+        try:
+            shutil.rmtree(self.session_temp_dir, ignore_errors=True)
+        finally:
+            self.logger.debug(
+                "Session temporary directory removed",
+                extra={"component": "AppCore", "temp_dir": str(self.session_temp_dir)},
+            )
+            self.session_temp_dir = None
 
     def _init_translations(self) -> None:
         app = QtCore.QCoreApplication.instance()
@@ -191,6 +254,14 @@ class AppCore:
             backup_retention=self.config.autosave_backup_retention,
             logger=autosave_logger,
         )
+        recovery_root = self.session_temp_dir / "recovery" if self.session_temp_dir else None
+        recovery_logger = logging.getLogger(f"{__name__}.Recovery")
+        self.recovery_manager = RecoveryManager(
+            autosave_dir,
+            crash_marker_root=recovery_root,
+            logger=recovery_logger,
+        )
+        self.recovery_manager.inspect_startup()
         self.logger.debug(
             "Autosave manager initialised",
             extra={"component": "AppCore", "autosave_dir": str(autosave_dir)},

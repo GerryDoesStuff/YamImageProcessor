@@ -29,6 +29,8 @@ from typing import Any, Dict, Mapping, MutableMapping, Optional
 import numpy as np
 from PIL import Image
 
+from .paths import sanitize_user_path
+
 
 _SUPPORTED_RASTER_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 
@@ -42,12 +44,10 @@ class ImageRecord:
 
 
 def _normalise_path(path: Path | str) -> Path:
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(path)
-    if not path.is_file():
-        raise IsADirectoryError(path)
-    return path
+    resolved = sanitize_user_path(path, must_exist=True, allow_directory=False)
+    if not resolved.is_file():
+        raise IsADirectoryError(resolved)
+    return resolved
 
 
 def load_image(path: Path | str) -> ImageRecord:
@@ -112,7 +112,7 @@ def _prepare_save_metadata(metadata: Mapping[str, Any] | None) -> Dict[str, Any]
 def save_image(record: ImageRecord, path: Path | str, format: Optional[str] = None) -> None:
     """Persist ``record`` to ``path`` using ``format`` if supplied."""
 
-    destination = Path(path)
+    destination = sanitize_user_path(path, must_exist=False, allow_directory=False)
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     fmt = (format or destination.suffix.lstrip(".")).upper()

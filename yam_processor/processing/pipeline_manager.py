@@ -118,13 +118,14 @@ class CachedArray:
         array: np.ndarray,
         *,
         threshold_bytes: int = DEFAULT_CACHE_THRESHOLD_BYTES,
-        cache_dir: Optional[str] = None,
+        cache_dir: Optional[os.PathLike[str] | str] = None,
     ) -> "CachedArray":
         """Create a cache entry backed by memory or disk depending on size."""
 
         if array.nbytes <= threshold_bytes:
             return cls("memory", array.copy(), None)
-        fd, filename = tempfile.mkstemp(suffix=".npy", dir=cache_dir)
+        dir_arg = os.fspath(cache_dir) if cache_dir is not None else None
+        fd, filename = tempfile.mkstemp(suffix=".npy", dir=dir_arg)
         os.close(fd)
         np.save(filename, array, allow_pickle=False)
         return cls("disk", None, filename)
@@ -135,7 +136,7 @@ class CachedArray:
         array: Optional[np.ndarray],
         *,
         threshold_bytes: int = DEFAULT_CACHE_THRESHOLD_BYTES,
-        cache_dir: Optional[str] = None,
+        cache_dir: Optional[os.PathLike[str] | str] = None,
     ) -> Optional["CachedArray"]:
         if array is None:
             return None
@@ -204,7 +205,7 @@ class PipelineHistoryEntry:
         intermediates: Optional[Dict[str, np.ndarray]] = None,
         *,
         threshold_bytes: int = DEFAULT_CACHE_THRESHOLD_BYTES,
-        cache_dir: Optional[str] = None,
+        cache_dir: Optional[os.PathLike[str] | str] = None,
     ) -> "PipelineHistoryEntry":
         cached_intermediates: Dict[str, CachedArray] = {}
         if intermediates:
@@ -293,13 +294,53 @@ class PipelineManager:
     serialising the pipeline configuration for persistence.
     """
 
-    def __init__(self, steps: Optional[Iterable[PipelineStep]] = None) -> None:
+    _DEFAULT_CACHE_DIR: Optional[str] = None
+    _DEFAULT_RECOVERY_ROOT: Optional[Path] = None
+
+    def __init__(
+        self,
+        steps: Optional[Iterable[PipelineStep]] = None,
+        *,
+        cache_dir: Optional[os.PathLike[str] | str] = None,
+        recovery_root: Optional[os.PathLike[str] | str] = None,
+    ) -> None:
         self.steps: List[PipelineStep] = list(steps or [])
         self._undo_stack: List[PipelineHistoryEntry] = []
         self._redo_stack: List[PipelineHistoryEntry] = []
         self._last_execution_entry: Optional[PipelineHistoryEntry] = None
-        self._recovery_root = Path(tempfile.gettempdir()) / "yam_processor" / "recovery"
+        self._cache_dir = os.fspath(cache_dir) if cache_dir is not None else self._DEFAULT_CACHE_DIR
+        if self._cache_dir is not None:
+            Path(self._cache_dir).mkdir(parents=True, exist_ok=True)
+        recovery_base = recovery_root or self._DEFAULT_RECOVERY_ROOT
+        if recovery_base is None:
+            recovery_base = Path(tempfile.gettempdir()) / "yam_processor" / "recovery"
+        self._recovery_root = Path(recovery_base)
+        self._recovery_root.mkdir(parents=True, exist_ok=True)
         self._last_failure: Optional[PipelineFailure] = None
+
+    @classmethod
+    def set_default_cache_directory(cls, path: Optional[os.PathLike[str] | str]) -> None:
+        cls._DEFAULT_CACHE_DIR = None if path is None else os.fspath(path)
+        if cls._DEFAULT_CACHE_DIR is not None:
+            Path(cls._DEFAULT_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def set_default_recovery_root(cls, path: Optional[os.PathLike[str] | str]) -> None:
+        cls._DEFAULT_RECOVERY_ROOT = None if path is None else Path(path)
+        if cls._DEFAULT_RECOVERY_ROOT is not None:
+            cls._DEFAULT_RECOVERY_ROOT.mkdir(parents=True, exist_ok=True)
+
+    def set_cache_directory(self, path: Optional[os.PathLike[str] | str]) -> None:
+        self._cache_dir = None if path is None else os.fspath(path)
+        if self._cache_dir is not None:
+            Path(self._cache_dir).mkdir(parents=True, exist_ok=True)
+
+    def set_recovery_root(self, path: Optional[os.PathLike[str] | str]) -> None:
+        base = None if path is None else Path(path)
+        if base is None:
+            base = Path(tempfile.gettempdir()) / "yam_processor" / "recovery"
+        base.mkdir(parents=True, exist_ok=True)
+        self._recovery_root = base
 
     # ------------------------------------------------------------------
     # Step management helpers
@@ -375,9 +416,15 @@ class PipelineManager:
         if self._last_execution_entry is not None:
             entry = self._last_execution_entry.clone()
             if output is not None:
-                entry.final_output = CachedArray.from_array(output)
+                entry.final_output = CachedArray.from_array(
+                    output, cache_dir=self._cache_dir
+                )
             return entry
-        return PipelineHistoryEntry.from_arrays(self.steps, output)
+        return PipelineHistoryEntry.from_arrays(
+            self.steps,
+            output,
+            cache_dir=self._cache_dir,
+        )
 
     def push_history(
         self,
@@ -389,12 +436,16 @@ class PipelineManager:
         if intermediates is None and self._last_execution_entry is not None:
             entry = self._last_execution_entry.clone()
             if output is not None:
-                entry.final_output = CachedArray.from_array(output)
+                entry.final_output = CachedArray.from_array(
+                    output,
+                    cache_dir=self._cache_dir,
+                )
         else:
             entry = PipelineHistoryEntry.from_arrays(
                 self.steps,
                 output,
                 intermediates,
+                cache_dir=self._cache_dir,
             )
         self._undo_stack.append(entry.clone())
         self._redo_stack.clear()
@@ -453,7 +504,7 @@ class PipelineManager:
         image: np.ndarray,
         *,
         cache_threshold_bytes: int = DEFAULT_CACHE_THRESHOLD_BYTES,
-        cache_dir: Optional[str] = None,
+        cache_dir: Optional[os.PathLike[str] | str] = None,
     ) -> np.ndarray:
         """Execute the pipeline against ``image`` returning the processed copy.
 
@@ -466,6 +517,7 @@ class PipelineManager:
         processed = image.copy()
         intermediates: Dict[str, CachedArray] = {}
         self._last_failure = None
+        cache_directory = os.fspath(cache_dir) if cache_dir is not None else self._cache_dir
         for step in self.steps:
             try:
                 processed = step.apply(processed)
@@ -488,12 +540,12 @@ class PipelineManager:
             intermediates[step.name] = CachedArray.from_array(
                 processed,
                 threshold_bytes=cache_threshold_bytes,
-                cache_dir=cache_dir,
+                cache_dir=cache_directory,
             )
         final_cache = CachedArray.from_optional(
             processed,
             threshold_bytes=cache_threshold_bytes,
-            cache_dir=cache_dir,
+            cache_dir=cache_directory,
         )
         entry = PipelineHistoryEntry(
             self._snapshot_steps(),

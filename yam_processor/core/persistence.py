@@ -17,6 +17,9 @@ from typing import Any, Dict, Optional
 _LOGGER = logging.getLogger(__name__)
 
 
+from yam_processor.data import sanitize_user_path
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -126,7 +129,11 @@ class AutosaveManager:
                 destination = self._project_path
             if destination is None:
                 raise ValueError("A destination path is required for the first save")
-            destination = Path(destination)
+            destination = sanitize_user_path(
+                destination,
+                must_exist=False,
+                allow_directory=False,
+            )
 
             state = self._state
             if pipeline is None:

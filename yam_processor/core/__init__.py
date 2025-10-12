@@ -3,6 +3,7 @@ from .app_core import AppConfiguration, AppCore
 from .logging_config import LoggingConfigurator, LoggingOptions
 from .module_loader import ModuleLoader
 from .persistence import AutosaveManager
+from .recovery import RecoveryManager
 from .settings_manager import SettingsManager
 from .threading import ThreadController
 
@@ -13,6 +14,7 @@ __all__ = [
     "LoggingOptions",
     "ModuleLoader",
     "AutosaveManager",
+    "RecoveryManager",
     "SettingsManager",
     "ThreadController",
 ]
