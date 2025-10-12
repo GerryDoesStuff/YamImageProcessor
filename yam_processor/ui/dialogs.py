@@ -47,11 +47,19 @@ class ParameterSpec:
         if self.minimum is not None or self.maximum is not None:
             lower = "-∞" if self.minimum is None else str(self.minimum)
             upper = "∞" if self.maximum is None else str(self.maximum)
-            sections.append(f"Valid range: {lower} – {upper}")
+            sections.append(
+                QtCore.QCoreApplication.translate(
+                    "ParameterSpec", "Valid range: {lower} – {upper}"
+                ).format(lower=lower, upper=upper)
+            )
 
         if self.shortcuts:
             shortcut_text = ", ".join(self.shortcuts)
-            sections.append(f"Shortcuts: {shortcut_text}")
+            sections.append(
+                QtCore.QCoreApplication.translate(
+                    "ParameterSpec", "Shortcuts: {shortcut_text}"
+                ).format(shortcut_text=shortcut_text)
+            )
 
         return "\n\n".join(sections)
 
@@ -114,7 +122,11 @@ class PreviewWidget(QtWidgets.QWidget):
     @staticmethod
     def _to_qimage(image: np.ndarray) -> tuple[QtGui.QImage, np.ndarray]:
         if image.ndim not in (2, 3):
-            raise ValueError("PreviewWidget expects 2D or 3D numpy arrays")
+            raise ValueError(
+                QtCore.QCoreApplication.translate(
+                    "PreviewWidget", "PreviewWidget expects 2D or 3D numpy arrays"
+                )
+            )
 
         array = np.ascontiguousarray(image)
 
@@ -135,7 +147,11 @@ class PreviewWidget(QtWidgets.QWidget):
                 array.data, width, height, 4 * width, QtGui.QImage.Format_RGBA8888
             )
             return qimage, array
-        raise ValueError("Unsupported channel count for preview rendering")
+        raise ValueError(
+            QtCore.QCoreApplication.translate(
+                "PreviewWidget", "Unsupported channel count for preview rendering"
+            )
+        )
 
 
 class _PreviewWorkerSignals(QtCore.QObject):
@@ -179,12 +195,14 @@ class ParameterDialog(QtWidgets.QDialog):
         preview_callback: Optional[Callable[[np.ndarray, Dict[str, Any]], np.ndarray]] = None,
         *,
         parent: Optional[QtWidgets.QWidget] = None,
-        window_title: str = "Module Parameters",
+        window_title: Optional[str] = None,
     ) -> None:
         super().__init__(parent)
         self.setModal(False)
         self.setWindowModality(QtCore.Qt.NonModal)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        if window_title is None:
+            window_title = self.tr("Module Parameters")
         self.setWindowTitle(window_title)
 
         self._schema: list[ParameterSpec] = list(schema)
@@ -269,7 +287,9 @@ class ParameterDialog(QtWidgets.QDialog):
 
         layout.addWidget(splitter, 1)
 
-        self._status_label = QtWidgets.QLabel("Adjust parameters to preview changes", self)
+        self._status_label = QtWidgets.QLabel(
+            self.tr("Adjust parameters to preview changes"), self
+        )
         self._status_label.setWordWrap(True)
         layout.addWidget(self._status_label)
 
@@ -395,7 +415,7 @@ class ParameterDialog(QtWidgets.QDialog):
     def _start_preview(self, params: Dict[str, Any]) -> None:
         if self._preview_callback is None or self._source_image is None:
             return
-        self._status_label.setText("Rendering preview…")
+        self._status_label.setText(self.tr("Rendering preview…"))
         image = np.array(self._source_image, copy=True)
         runnable = _PreviewRunnable(self._preview_callback, image, dict(params))
         runnable.signals.finished.connect(self._handle_preview_finished)
@@ -409,10 +429,10 @@ class ParameterDialog(QtWidgets.QDialog):
         if isinstance(result, np.ndarray):
             self._preview_widget.set_image(result)
             self.previewUpdated.emit(result)
-            self._status_label.setText("Preview updated")
+            self._status_label.setText(self.tr("Preview updated"))
         else:
             self._preview_widget.set_image(None)
-            self._status_label.setText("Preview unavailable")
+            self._status_label.setText(self.tr("Preview unavailable"))
         if self._pending_params is not None:
             params = self._pending_params
             self._pending_params = None
@@ -422,7 +442,9 @@ class ParameterDialog(QtWidgets.QDialog):
     def _handle_preview_failed(self, error: Exception) -> None:  # pragma: no cover - Qt threading
         self._preview_running = False
         self.previewFailed.emit(error)
-        self._status_label.setText(f"Preview error: {error}")
+        self._status_label.setText(
+            self.tr("Preview error: {error}").format(error=error)
+        )
         if self._pending_params is not None:
             params = self._pending_params
             self._pending_params = None

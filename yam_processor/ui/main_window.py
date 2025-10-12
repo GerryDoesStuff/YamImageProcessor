@@ -48,7 +48,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if pipeline_controller is not None:
             self.set_pipeline_controller(pipeline_controller)
 
-        self.setWindowTitle("Yam Image Processor")
+        self.setWindowTitle(self.tr("Yam Image Processor"))
 
         self._central_widget = QtWidgets.QWidget(self)
         self._central_layout = QtWidgets.QVBoxLayout(self._central_widget)
@@ -99,91 +99,113 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setStatusBar(status_bar)
 
     def _build_actions(self) -> None:
-        self.open_project_action = QtWidgets.QAction("&Open Project…", self)
+        self.open_project_action = QtWidgets.QAction(self.tr("&Open Project…"), self)
         self.open_project_action.setIcon(load_icon("open_project"))
         self.open_project_action.setShortcut(QtGui.QKeySequence.Open)
-        self.open_project_action.setStatusTip("Open a pipeline configuration from disk")
+        self.open_project_action.setStatusTip(
+            self.tr("Open a pipeline configuration from disk")
+        )
         self.open_project_action.triggered.connect(self._on_open_project)
 
-        self.save_project_action = QtWidgets.QAction("&Save Project", self)
+        self.save_project_action = QtWidgets.QAction(self.tr("&Save Project"), self)
         self.save_project_action.setIcon(load_icon("save_project"))
         self.save_project_action.setShortcut(QtGui.QKeySequence.Save)
-        self.save_project_action.setStatusTip("Persist the active pipeline configuration")
+        self.save_project_action.setStatusTip(
+            self.tr("Persist the active pipeline configuration")
+        )
         self.save_project_action.triggered.connect(self._on_save_project)
 
-        self.save_project_as_action = QtWidgets.QAction("Save Project &As…", self)
+        self.save_project_as_action = QtWidgets.QAction(
+            self.tr("Save Project &As…"), self
+        )
         self.save_project_as_action.setIcon(load_icon("save_project_as"))
         self.save_project_as_action.setShortcut(QtGui.QKeySequence.SaveAs)
-        self.save_project_as_action.setStatusTip("Persist the active pipeline configuration to a new file")
+        self.save_project_as_action.setStatusTip(
+            self.tr("Persist the active pipeline configuration to a new file")
+        )
         self.save_project_as_action.triggered.connect(self._on_save_project_as)
 
-        self.exit_action = QtWidgets.QAction("E&xit", self)
+        self.exit_action = QtWidgets.QAction(self.tr("E&xit"), self)
         self.exit_action.setIcon(load_icon("exit"))
         self.exit_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.Quit))
-        self.exit_action.setStatusTip("Close Yam Image Processor")
+        self.exit_action.setStatusTip(self.tr("Close Yam Image Processor"))
         self.exit_action.triggered.connect(self._on_exit_requested)
 
-        self.undo_action = QtWidgets.QAction("&Undo", self)
+        self.undo_action = QtWidgets.QAction(self.tr("&Undo"), self)
         self.undo_action.setIcon(load_icon("undo"))
         self.undo_action.setShortcut(QtGui.QKeySequence.Undo)
-        self.undo_action.setStatusTip("Undo the previous pipeline change")
+        self.undo_action.setStatusTip(self.tr("Undo the previous pipeline change"))
         self.undo_action.triggered.connect(self._on_undo_requested)
 
-        self.redo_action = QtWidgets.QAction("&Redo", self)
+        self.redo_action = QtWidgets.QAction(self.tr("&Redo"), self)
         self.redo_action.setIcon(load_icon("redo"))
         self.redo_action.setShortcut(QtGui.QKeySequence.Redo)
-        self.redo_action.setStatusTip("Redo the previously undone pipeline change")
+        self.redo_action.setStatusTip(
+            self.tr("Redo the previously undone pipeline change")
+        )
         self.redo_action.triggered.connect(self._on_redo_requested)
 
-        self.manage_modules_action = QtWidgets.QAction("&Manage Modules…", self)
+        self.manage_modules_action = QtWidgets.QAction(
+            self.tr("&Manage Modules…"), self
+        )
         self.manage_modules_action.setIcon(load_icon("manage_modules"))
         self.manage_modules_action.setShortcut(QtGui.QKeySequence("Ctrl+M"))
-        self.manage_modules_action.setStatusTip("Open the module manager")
+        self.manage_modules_action.setStatusTip(self.tr("Open the module manager"))
         self.manage_modules_action.triggered.connect(self.manageModulesRequested.emit)
 
-        self.documentation_action = QtWidgets.QAction("&Documentation", self)
+        self.documentation_action = QtWidgets.QAction(
+            self.tr("&Documentation"), self
+        )
         self.documentation_action.setIcon(load_icon("documentation"))
         self.documentation_action.setShortcut(QtGui.QKeySequence.HelpContents)
-        self.documentation_action.setStatusTip("Open the user documentation")
+        self.documentation_action.setStatusTip(self.tr("Open the user documentation"))
         self.documentation_action.triggered.connect(self.documentationRequested.emit)
 
-        self.about_action = QtWidgets.QAction("&About", self)
+        self.about_action = QtWidgets.QAction(self.tr("&About"), self)
         self.about_action.setIcon(load_icon("about"))
-        self.about_action.setStatusTip("Show information about Yam Image Processor")
+        self.about_action.setStatusTip(
+            self.tr("Show information about Yam Image Processor")
+        )
         self.about_action.triggered.connect(self.aboutRequested.emit)
 
     def _build_menus(self) -> None:
         menu_bar = self.menuBar()
 
-        self.file_menu = menu_bar.addMenu("&File")
+        self.file_menu = menu_bar.addMenu(self.tr("&File"))
         self.file_menu.addAction(self.open_project_action)
         self.file_menu.addAction(self.save_project_action)
         self.file_menu.addAction(self.save_project_as_action)
         self.file_menu.addSeparator()
         self.file_menu.addAction(self.exit_action)
 
-        self.edit_menu = menu_bar.addMenu("&Edit")
+        self.edit_menu = menu_bar.addMenu(self.tr("&Edit"))
         self.edit_menu.addAction(self.undo_action)
         self.edit_menu.addAction(self.redo_action)
 
-        self.view_menu = menu_bar.addMenu("&View")
+        self.view_menu = menu_bar.addMenu(self.tr("&View"))
 
-        self.modules_menu = menu_bar.addMenu("&Modules")
+        self.modules_menu = menu_bar.addMenu(self.tr("&Modules"))
         self.modules_menu.addAction(self.manage_modules_action)
 
-        self.help_menu = menu_bar.addMenu("&Help")
+        self.help_menu = menu_bar.addMenu(self.tr("&Help"))
         self.help_menu.addAction(self.documentation_action)
         self.help_menu.addAction(self.about_action)
 
     def _build_docks(self) -> None:
         self.pipeline_dock = self._create_dock(
-            "Pipeline", "Pipeline configuration and ordering controls"
+            self.tr("Pipeline"),
+            self.tr("Pipeline configuration and ordering controls"),
+            object_name="pipelineDock",
         )
         self.preview_dock = self._create_dock(
-            "Preview", "Pipeline output preview"
+            self.tr("Preview"),
+            self.tr("Pipeline output preview"),
+            object_name="previewDock",
         )
         self.diagnostics_dock = self._create_dock(
-            "Diagnostics", "Log output and performance metrics"
+            self.tr("Diagnostics"),
+            self.tr("Log output and performance metrics"),
+            object_name="diagnosticsDock",
         )
 
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.pipeline_dock)
@@ -210,9 +232,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._install_context_menus()
 
-    def _create_dock(self, title: str, placeholder_text: str) -> QtWidgets.QDockWidget:
+    def _create_dock(
+        self, title: str, placeholder_text: str, *, object_name: str
+    ) -> QtWidgets.QDockWidget:
         dock = QtWidgets.QDockWidget(title, self)
-        dock.setObjectName(f"{title.lower()}Dock")
+        dock.setObjectName(object_name)
         dock.setAllowedAreas(
             QtCore.Qt.LeftDockWidgetArea
             | QtCore.Qt.RightDockWidgetArea
@@ -421,10 +445,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._logger.debug("Save requested but autosave manager not configured")
             except Exception as exc:  # pragma: no cover - Qt exception handling
                 self._logger.error("Failed to save project", exc_info=exc)
-                self.statusMessageRequested.emit("Failed to save project", 5000)
+                self.statusMessageRequested.emit(
+                    self.tr("Failed to save project"), 5000
+                )
                 return
             else:
-                self.statusMessageRequested.emit("Project saved", 3000)
+                self.statusMessageRequested.emit(self.tr("Project saved"), 3000)
                 return
 
         self.saveProjectRequested.emit()
