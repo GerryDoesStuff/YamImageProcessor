@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Iterable, Optional
 
 from PyQt5 import QtCore, QtGui, QtWidgets  # type: ignore
@@ -37,6 +38,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
         )
 
+        self._logger = logging.getLogger(__name__)
         self._pipeline_controller: Optional[PipelineController] = None
         if pipeline_controller is not None:
             self.set_pipeline_controller(pipeline_controller)
@@ -298,6 +300,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.pyqtSlot()
     def _on_save_project(self) -> None:
+        if self._pipeline_controller is not None:
+            try:
+                self._pipeline_controller.save_project(None)
+            except ValueError:
+                self._logger.debug("Save requested without a known destination; deferring to Save As")
+            except RuntimeError:
+                self._logger.debug("Save requested but autosave manager not configured")
+            except Exception as exc:  # pragma: no cover - Qt exception handling
+                self._logger.error("Failed to save project", exc_info=exc)
+                self.statusMessageRequested.emit("Failed to save project", 5000)
+                return
+            else:
+                self.statusMessageRequested.emit("Project saved", 3000)
+                return
+
         self.saveProjectRequested.emit()
 
     @QtCore.pyqtSlot()
