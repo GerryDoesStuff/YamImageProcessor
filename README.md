@@ -33,3 +33,9 @@ app_core.bootstrap()
 
 This repository currently focuses on establishing the foundation; additional processing pipelines and UI components can be buil
 t on top of the provided scaffolding.
+
+## Localisation
+
+Strings in the Qt user interface are translation-ready.  See
+[`docs/TRANSLATIONS.md`](docs/TRANSLATIONS.md) for instructions on generating and
+packaging language packs with Qt Linguist tools.
