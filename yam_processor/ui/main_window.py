@@ -9,9 +9,11 @@ from typing import Iterable, Optional
 from PyQt5 import QtCore, QtGui, QtWidgets  # type: ignore
 
 from .error_dialog import ErrorDialog
+from .diagnostics_panel import DiagnosticsPanel
 from .pipeline_controller import PipelineController
 from .resources import load_icon
 from .tooltips import build_main_window_tooltips
+from yam_processor.core.threading import ThreadController
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -36,6 +38,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self,
         pipeline_controller: Optional[PipelineController] = None,
         parent: Optional[QtWidgets.QWidget] = None,
+        *,
+        thread_controller: Optional[ThreadController] = None,
     ) -> None:
         super().__init__(parent)
 
@@ -48,11 +52,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_accessibility_preferences()
 
         self._logger = logging.getLogger(__name__)
+        self._thread_controller: Optional[ThreadController] = thread_controller
         self._pipeline_controller: Optional[PipelineController] = None
         if pipeline_controller is not None:
             self.set_pipeline_controller(pipeline_controller)
 
         self.setWindowTitle(self.tr("Yam Image Processor"))
+
+        self.diagnostics_panel: Optional[DiagnosticsPanel] = None
 
         self._central_widget = QtWidgets.QWidget(self)
         self._central_layout = QtWidgets.QVBoxLayout(self._central_widget)
@@ -78,6 +85,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._pipeline_controller = controller
         self._apply_action_tooltips()
+
+    def set_thread_controller(self, controller: ThreadController) -> None:
+        """Bind the diagnostics panel to ``controller``."""
+
+        self._thread_controller = controller
+        if self.diagnostics_panel is not None:
+            self.diagnostics_panel.set_thread_controller(controller)
+
+    def diagnostics_log_handler(self) -> Optional[logging.Handler]:
+        """Return the logging handler streaming messages to the diagnostics panel."""
+
+        if self.diagnostics_panel is None:
+            return None
+        return self.diagnostics_panel.log_handler()
 
     @QtCore.pyqtSlot(bool)
     def toggle_pipeline_dock(self, visible: bool) -> None:
@@ -173,6 +194,22 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.about_action.triggered.connect(self.aboutRequested.emit)
 
+        self.focus_diagnostics_action = QtWidgets.QAction(
+            self.tr("Focus Diagnostics"), self
+        )
+        self.focus_diagnostics_action.setStatusTip(
+            self.tr("Show and focus the diagnostics panel")
+        )
+        self.focus_diagnostics_action.triggered.connect(self._on_focus_diagnostics)
+
+        self.clear_diagnostics_action = QtWidgets.QAction(
+            self.tr("Clear Diagnostics Log"), self
+        )
+        self.clear_diagnostics_action.setStatusTip(
+            self.tr("Remove logged entries from the diagnostics panel")
+        )
+        self.clear_diagnostics_action.triggered.connect(self._on_clear_diagnostics)
+
     def _build_menus(self) -> None:
         menu_bar = self.menuBar()
 
@@ -207,10 +244,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Pipeline output preview"),
             object_name="previewDock",
         )
+        self.diagnostics_panel = DiagnosticsPanel(self)
+        self.diagnostics_panel.attach_to_logger(logging.getLogger())
+        if self._thread_controller is not None:
+            self.diagnostics_panel.set_thread_controller(self._thread_controller)
         self.diagnostics_dock = self._create_dock(
             self.tr("Diagnostics"),
             self.tr("Log output and performance metrics"),
             object_name="diagnosticsDock",
+            content_widget=self.diagnostics_panel,
         )
 
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.pipeline_dock)
@@ -230,16 +272,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pipeline_toggle_action = self.pipeline_dock.toggleViewAction()
         self.preview_toggle_action = self.preview_dock.toggleViewAction()
         self.diagnostics_toggle_action = self.diagnostics_dock.toggleViewAction()
+        self.diagnostics_toggle_action.triggered.connect(
+            self._on_diagnostics_toggle_triggered
+        )
 
         self.view_menu.addAction(self.pipeline_toggle_action)
         self.view_menu.addAction(self.preview_toggle_action)
         self.view_menu.addAction(self.diagnostics_toggle_action)
+        self.view_menu.addSeparator()
+        self.view_menu.addAction(self.focus_diagnostics_action)
+        self.view_menu.addAction(self.clear_diagnostics_action)
 
         self._install_context_menus()
         self._apply_action_tooltips()
 
     def _create_dock(
-        self, title: str, placeholder_text: str, *, object_name: str
+        self,
+        title: str,
+        placeholder_text: str,
+        *,
+        object_name: str,
+        content_widget: Optional[QtWidgets.QWidget] = None,
     ) -> QtWidgets.QDockWidget:
         dock = QtWidgets.QDockWidget(title, self)
         dock.setObjectName(object_name)
@@ -254,10 +307,14 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(dock_content)
         layout.setContentsMargins(*self._scaled_margins(12))
         layout.setSpacing(self._scaled_value(6))
-        label = QtWidgets.QLabel(placeholder_text, dock_content)
-        label.setAlignment(QtCore.Qt.AlignCenter)
-        label.setFocusPolicy(QtCore.Qt.StrongFocus)
-        layout.addWidget(label)
+        if content_widget is None:
+            label = QtWidgets.QLabel(placeholder_text, dock_content)
+            label.setAlignment(QtCore.Qt.AlignCenter)
+            label.setFocusPolicy(QtCore.Qt.StrongFocus)
+            layout.addWidget(label)
+        else:
+            content_widget.setParent(dock_content)
+            layout.addWidget(content_widget)
         dock.setWidget(dock_content)
         return dock
 
@@ -292,6 +349,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.pipeline_toggle_action,
                 self.preview_toggle_action,
                 self.diagnostics_toggle_action,
+                None,
+                self.focus_diagnostics_action,
+                self.clear_diagnostics_action,
             ),
         )
 
@@ -327,6 +387,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "pipeline_toggle": getattr(self, "pipeline_toggle_action", None),
             "preview_toggle": getattr(self, "preview_toggle_action", None),
             "diagnostics_toggle": getattr(self, "diagnostics_toggle_action", None),
+            "diagnostics_focus": getattr(self, "focus_diagnostics_action", None),
+            "diagnostics_clear": getattr(self, "clear_diagnostics_action", None),
         }
 
         for key, action in action_mapping.items():
@@ -511,6 +573,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_exit_requested(self) -> None:
         self.exitRequested.emit()
         self.close()
+
+    @QtCore.pyqtSlot()
+    def _on_focus_diagnostics(self) -> None:
+        self._focus_target(self.diagnostics_dock)
+        if self.diagnostics_panel is not None:
+            self.diagnostics_panel.focus_logs()
+
+    @QtCore.pyqtSlot()
+    def _on_clear_diagnostics(self) -> None:
+        if self.diagnostics_panel is not None:
+            self.diagnostics_panel.clear_logs()
+
+    @QtCore.pyqtSlot(bool)
+    def _on_diagnostics_toggle_triggered(self, visible: bool) -> None:
+        if visible:
+            self._on_focus_diagnostics()
 
     @QtCore.pyqtSlot()
     def _on_undo_requested(self) -> None:
