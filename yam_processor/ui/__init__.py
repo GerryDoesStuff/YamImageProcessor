@@ -6,7 +6,15 @@ instance during startup, optionally providing a
 pipeline behaviours before showing the window.
 """
 
+from .dialogs import ParameterDialog, ParameterSpec, ParameterType, PreviewWidget
 from .main_window import MainWindow
 from .pipeline_controller import PipelineController
 
-__all__ = ["MainWindow", "PipelineController"]
+__all__ = [
+    "MainWindow",
+    "ParameterDialog",
+    "ParameterSpec",
+    "ParameterType",
+    "PipelineController",
+    "PreviewWidget",
+]

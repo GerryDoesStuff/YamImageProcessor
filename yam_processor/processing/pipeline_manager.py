@@ -162,6 +162,11 @@ class PipelineManager:
         step.enabled = not step.enabled
         LOGGER.info("Toggled step '%s' -> %s", step.name, step.enabled)
 
+    def get_step(self, identifier: int | str) -> PipelineStep:
+        """Return the step referenced by ``identifier`` without mutation."""
+
+        return self._resolve_step(identifier)
+
     def _resolve_step(self, identifier: int | str) -> PipelineStep:
         if isinstance(identifier, int):
             return self.steps[identifier]

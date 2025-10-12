@@ -4,12 +4,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Dict, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, Sequence, TypeVar
 
 import numpy as np
 
 if TYPE_CHECKING:  # pragma: no cover - import guard for typing
     from yam_processor.core.app_core import AppCore
+    from yam_processor.ui.dialogs import ParameterSpec
 
 
 __all__ = [
@@ -72,6 +73,16 @@ class ModuleBase(ABC):
     @abstractmethod
     def process(self, image: np.ndarray, **kwargs: Any) -> Any:
         """Execute the module logic against ``image``."""
+
+    def parameter_schema(self) -> Sequence["ParameterSpec"]:
+        """Return the parameter controls consumed by the module."""
+
+        return ()
+
+    def preview(self, image: np.ndarray, **kwargs: Any) -> np.ndarray:
+        """Generate a preview for the provided ``image``."""
+
+        return np.array(image, copy=True)
 
 
 class PreprocessingModule(ModuleBase, ABC):
