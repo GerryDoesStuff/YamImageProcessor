@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence
 
 import numpy as np
 
 from PyQt5 import QtWidgets  # type: ignore
 
+from yam_processor.data import ImageRecord, load_image, save_image
 from yam_processor.processing import PipelineManager, PipelineStep
 
 from .dialogs import ParameterDialog, ParameterSpec
@@ -32,6 +34,33 @@ class PipelineController:
         self.manager = self._builder()
         LOGGER.debug("Pipeline rebuilt with steps: %s", self.manager.get_order())
         return self.manager
+
+    # ------------------------------------------------------------------
+    # Image I/O helpers
+    # ------------------------------------------------------------------
+    def load_image_record(self, path: str | Path, *, record_history: bool = False) -> ImageRecord:
+        """Load an image file into an :class:`ImageRecord`.
+
+        Parameters
+        ----------
+        path:
+            Location of the image or ``.npy`` file on disk.
+        record_history:
+            When ``True`` the loaded pixel data is appended to the pipeline
+            history so it can participate in undo/redo operations.
+        """
+
+        record = load_image(path)
+        if record_history:
+            self.record_history(record.data)
+        return record
+
+    def save_image_record(
+        self, record: ImageRecord, path: str | Path, *, format: Optional[str] = None
+    ) -> None:
+        """Persist ``record`` using the shared image I/O helpers."""
+
+        save_image(record, path, format)
 
     # ------------------------------------------------------------------
     # Parameter dialog helpers
