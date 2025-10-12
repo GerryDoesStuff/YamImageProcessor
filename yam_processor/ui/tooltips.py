@@ -232,4 +232,21 @@ def build_main_window_tooltips(
                 ),
             )
         ),
+        "diagnostics_focus": _join_sections(
+            (
+                QtCore.QCoreApplication.translate(
+                    "ToolTips", "Bring the diagnostics panel to the front and focus the log view."
+                ),
+                QtCore.QCoreApplication.translate(
+                    "ToolTips", "Useful when you need to monitor messages during long operations.",
+                ),
+            )
+        ),
+        "diagnostics_clear": _join_sections(
+            (
+                QtCore.QCoreApplication.translate(
+                    "ToolTips", "Clear the diagnostics log output to simplify new troubleshooting."
+                ),
+            )
+        ),
     }
