@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import traceback
 from typing import Iterable, Optional
 
 from PyQt5 import QtCore, QtGui, QtWidgets  # type: ignore
 
+from .error_dialog import ErrorDialog
 from .pipeline_controller import PipelineController
 from .resources import load_icon
 from .tooltips import build_main_window_tooltips
@@ -28,6 +30,7 @@ class MainWindow(QtWidgets.QMainWindow):
     manageModulesRequested = QtCore.pyqtSignal()
     documentationRequested = QtCore.pyqtSignal()
     aboutRequested = QtCore.pyqtSignal()
+    errorOccurred = QtCore.pyqtSignal(str, dict)
 
     def __init__(
         self,
@@ -488,9 +491,10 @@ class MainWindow(QtWidgets.QMainWindow):
             except RuntimeError:
                 self._logger.debug("Save requested but autosave manager not configured")
             except Exception as exc:  # pragma: no cover - Qt exception handling
-                self._logger.error("Failed to save project", exc_info=exc)
-                self.statusMessageRequested.emit(
-                    self.tr("Failed to save project"), 5000
+                self._report_error(
+                    "save_project",
+                    self.tr("Failed to save project"),
+                    exc,
                 )
                 return
             else:
@@ -512,7 +516,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_undo_requested(self) -> None:
         result = None
         if self._pipeline_controller is not None:
-            result = self._pipeline_controller.undo(None)
+            try:
+                result = self._pipeline_controller.undo(None)
+            except Exception as exc:  # pragma: no cover - Qt exception handling
+                self._report_error(
+                    "undo",
+                    self.tr("Failed to undo pipeline change"),
+                    exc,
+                )
+                return
         self.undoRequested.emit(result)
         self._apply_action_tooltips()
 
@@ -520,9 +532,46 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_redo_requested(self) -> None:
         result = None
         if self._pipeline_controller is not None:
-            result = self._pipeline_controller.redo(None)
+            try:
+                result = self._pipeline_controller.redo(None)
+            except Exception as exc:  # pragma: no cover - Qt exception handling
+                self._report_error(
+                    "redo",
+                    self.tr("Failed to redo pipeline change"),
+                    exc,
+                )
+                return
         self.redoRequested.emit(result)
         self._apply_action_tooltips()
+
+    def _report_error(self, operation: str, message: str, exc: Exception) -> None:
+        """Centralised handler for UI level exceptions."""
+
+        traceback_text = traceback.format_exc()
+        metadata = {
+            "operation": operation,
+            "window": self.objectName() or self.__class__.__name__,
+        }
+        if self._pipeline_controller is not None:
+            metadata["controller"] = type(self._pipeline_controller).__name__
+        payload = dict(metadata)
+        payload.update(
+            {
+                "exceptionType": type(exc).__name__,
+                "exceptionMessage": str(exc),
+                "traceback": traceback_text,
+            }
+        )
+        self._logger.error(message, exc_info=exc, extra={"operation": operation})
+        ErrorDialog.present(
+            message,
+            traceback_text,
+            parent=self,
+            metadata=metadata,
+            window_title=self.tr("Operation failed"),
+        )
+        self.errorOccurred.emit(operation, payload)
+        self.statusMessageRequested.emit(message, 5000)
 
 __all__ = ["MainWindow"]
 
