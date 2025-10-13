@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from core.app_core import AppCore
 from core.segmentation import Config, Loader, Preprocessor, parse_bool
 from processing.segmentation_pipeline import (
     PipelineStep,
@@ -843,8 +844,9 @@ def process_segmentation_file(file: str, folder: str, pipeline_settings: dict) -
 #####################################
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self):
+    def __init__(self, app_core: AppCore):
         super().__init__()
+        self.app_core = app_core
         self.setWindowTitle("Image Segmentation Module")
         self.resize(1200,700)
         self.original_image: Optional[np.ndarray] = None
@@ -854,7 +856,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.redo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.current_preview: Optional[np.ndarray] = None
-        self.settings = QtCore.QSettings(Config.SETTINGS_ORG, Config.SETTINGS_APP)
+        self.settings = self.app_core.qsettings
         # Set default segmentation parameters if missing.
         if not self.settings.contains("segmentation/Global/threshold"):
             self.settings.setValue("segmentation/Global/threshold", 127)
@@ -899,7 +901,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_shortcut.activated.connect(self.undo)
         self.redo_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Y"), self)
         self.redo_shortcut.activated.connect(self.redo)
-        self.pipeline = build_segmentation_pipeline(self.settings)
+        self.pipeline = build_segmentation_pipeline(self.app_core)
         self.update_pipeline_label()
         if self.base_image is not None:
             self.update_preview()
@@ -909,7 +911,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pipeline_label.setText("Current Pipeline: " + " -> ".join(order) if order else "Current Pipeline: (none)")
 
     def rebuild_pipeline(self):
-        self.pipeline = build_segmentation_pipeline(self.settings)
+        self.pipeline = build_segmentation_pipeline(self.app_core)
         logging.debug("Pipeline rebuilt: " + ", ".join([step.name for step in self.pipeline.steps]))
         self.update_pipeline_label()
 
@@ -1116,7 +1118,7 @@ class MainWindow(QtWidgets.QMainWindow):
         temp_dict["segmentation/order"] = ",".join(temp_order)
         for key, value in new_params.items():
             temp_dict[f"segmentation/{ns}/{key}"] = value
-        temp_pipeline = build_segmentation_pipeline_from_dict(temp_dict)
+        temp_pipeline = build_segmentation_pipeline_from_dict(temp_dict, self.app_core)
         if self.base_image is not None:
             new_preview = temp_pipeline.apply(self.base_image)
             self.current_preview = new_preview.copy()
@@ -1564,7 +1566,7 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 self.original_image = Loader.load_image(filename)
                 self.base_image = self.original_image.copy()
-                self.committed_image = build_segmentation_pipeline(self.settings).apply(self.base_image)
+                self.committed_image = build_segmentation_pipeline(self.app_core).apply(self.base_image)
                 self.current_preview = self.committed_image.copy()
                 self.original_display.set_image(self.original_image)
                 self.preview_display.set_image(self.current_preview)

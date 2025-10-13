@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
-from PyQt5 import QtCore
 
+from core.app_core import AppCore
 from core.segmentation import (
     Preprocessor,
     active_contour,
@@ -45,26 +45,34 @@ class PipelineStep:
         return self.function(image, **self.params)
 
 class ProcessingPipeline:
-    def __init__(self):
+    def __init__(self, app_core: Optional[AppCore] = None):
         self.steps: List[PipelineStep] = []
+        self.app_core = app_core
+        self.thread_controller = getattr(app_core, "thread_controller", None)
+
     def add_step(self, step: PipelineStep):
         self.steps.append(step)
+
     def clear_steps(self):
         self.steps = []
+
     def apply(self, image: np.ndarray) -> np.ndarray:
         processed = image.copy()
         for step in self.steps:
             processed = step.apply(processed)
         return processed
 
-def get_settings_dict(settings: QtCore.QSettings) -> dict:
-    d = {}
-    for key in settings.allKeys():
-        d[key] = settings.value(key)
-    return d
 
-def build_segmentation_pipeline_from_dict(settings_dict: dict) -> ProcessingPipeline:
-    pipeline = ProcessingPipeline()
+def get_settings_dict(app_core: AppCore) -> dict:
+    settings = app_core.qsettings
+    return {key: settings.value(key) for key in settings.allKeys()}
+
+
+def build_segmentation_pipeline_from_dict(
+    settings_dict: dict,
+    app_core: Optional[AppCore] = None,
+) -> ProcessingPipeline:
+    pipeline = ProcessingPipeline(app_core)
     order_str = settings_dict.get("segmentation/order", "")
     order = order_str.split(",") if order_str else []
     for method in order:
@@ -162,8 +170,8 @@ def build_segmentation_pipeline_from_dict(settings_dict: dict) -> ProcessingPipe
         pipeline.add_step(PipelineStep(name=method, function=func, enabled=True, params=params))
     return pipeline
 
-def build_segmentation_pipeline(settings: QtCore.QSettings) -> ProcessingPipeline:
-    return build_segmentation_pipeline_from_dict(get_settings_dict(settings))
+def build_segmentation_pipeline(app_core: AppCore) -> ProcessingPipeline:
+    return build_segmentation_pipeline_from_dict(get_settings_dict(app_core), app_core)
 
 
 __all__ = [
