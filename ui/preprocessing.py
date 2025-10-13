@@ -17,6 +17,7 @@ from core.app_core import AppCore
 from core.preprocessing import Config, Loader
 from core.thread_controller import OperationCancelled, ThreadController
 from plugins.module_base import ModuleBase, ModuleStage
+from processing.pipeline_cache import PipelineCacheResult
 from processing.pipeline_manager import PipelineManager
 from processing.preprocessing_pipeline import (
     PreprocessingPipeline,
@@ -466,6 +467,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.app_core.get_preprocessing_pipeline_manager()
         )
         self.pipeline_manager.reset()
+        self.pipeline_cache = self.app_core.pipeline_cache
+        self._source_id: Optional[str] = None
+        self._preview_signature: Optional[str] = None
+        self._committed_signature: Optional[str] = None
+        self._last_pipeline_metadata: Dict[str, Any] = {}
         if self.app_core.thread_controller is None:
             self.app_core.thread_controller = ThreadController(parent=self)
         self.thread_controller: ThreadController = self.app_core.thread_controller
@@ -713,30 +719,100 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_pipeline_label()
 
     def undo(self):
-        snapshot = self.pipeline_manager.undo(current_image=self.committed_image)
+        snapshot = self.pipeline_manager.undo(
+            current_image=self.committed_image,
+            current_cache_signature=self._committed_signature,
+        )
         if snapshot is None:
             return
-        if snapshot.image is not None:
-            self.committed_image = snapshot.image.copy()
+        self._committed_signature = snapshot.cache_signature
+        cached_image: Optional[np.ndarray] = None
+        metadata: Dict[str, Any] = {}
+        if snapshot.cache_signature and self._source_id is not None:
+            cached_image = self.pipeline_cache.get_cached_image(
+                self._source_id, snapshot.cache_signature
+            )
+            metadata = self.pipeline_cache.metadata_for(
+                self._source_id, snapshot.cache_signature
+            )
+        image_to_use: Optional[np.ndarray] = None
+        if cached_image is not None:
+            image_to_use = cached_image
+        elif snapshot.image is not None:
+            image_to_use = snapshot.image.copy()
+
         self.rebuild_pipeline()
-        if self.base_image is not None:
+
+        need_compute = False
+        if image_to_use is not None:
+            self.committed_image = np.array(image_to_use, copy=True)
+            self.current_preview = self.committed_image.copy()
+            self.preview_display.set_image(self.current_preview)
+            self._preview_signature = snapshot.cache_signature
+            if metadata:
+                self._last_pipeline_metadata = metadata
+            else:
+                self._last_pipeline_metadata = {}
+                need_compute = True
+        else:
+            self._last_pipeline_metadata = {}
+            self._preview_signature = snapshot.cache_signature
+            need_compute = True
+
+        if need_compute and self.base_image is not None:
+            callback = self._update_committed_from_result
             self._apply_pipeline_async(
                 description="Updating preview",
-                on_finished=self._update_preview_from_result,
+                on_finished=callback,
             )
         self.update_undo_redo_actions()
 
     def redo(self):
-        snapshot = self.pipeline_manager.redo(current_image=self.committed_image)
+        snapshot = self.pipeline_manager.redo(
+            current_image=self.committed_image,
+            current_cache_signature=self._committed_signature,
+        )
         if snapshot is None:
             return
-        if snapshot.image is not None:
-            self.committed_image = snapshot.image.copy()
+        self._committed_signature = snapshot.cache_signature
+        cached_image: Optional[np.ndarray] = None
+        metadata: Dict[str, Any] = {}
+        if snapshot.cache_signature and self._source_id is not None:
+            cached_image = self.pipeline_cache.get_cached_image(
+                self._source_id, snapshot.cache_signature
+            )
+            metadata = self.pipeline_cache.metadata_for(
+                self._source_id, snapshot.cache_signature
+            )
+        image_to_use: Optional[np.ndarray] = None
+        if cached_image is not None:
+            image_to_use = cached_image
+        elif snapshot.image is not None:
+            image_to_use = snapshot.image.copy()
+
         self.rebuild_pipeline()
-        if self.base_image is not None:
+
+        need_compute = False
+        if image_to_use is not None:
+            self.committed_image = np.array(image_to_use, copy=True)
+            self.current_preview = self.committed_image.copy()
+            self.preview_display.set_image(self.current_preview)
+            self._preview_signature = snapshot.cache_signature
+            if metadata:
+                self._last_pipeline_metadata = metadata
+            else:
+                self._last_pipeline_metadata = {}
+                need_compute = True
+        else:
+            self._last_pipeline_metadata = {}
+            self._preview_signature = snapshot.cache_signature
+            need_compute = True
+
+        if need_compute and self.base_image is not None:
+            callback = self._update_committed_from_result
             self._apply_pipeline_async(
                 description="Updating preview",
-                on_finished=self._update_preview_from_result,
+                on_finished=callback,
             )
         self.update_undo_redo_actions()
 
@@ -1117,23 +1193,37 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.statusBar().showMessage("Error during processing", 4000)
 
+    def _ensure_source_registered(self, image: np.ndarray) -> Optional[str]:
+        if self._source_id is None:
+            hint = self.current_image_path or None
+            self._source_id = self.pipeline_cache.register_source(image, hint=hint)
+        return self._source_id
+
     def _apply_pipeline_async(
         self,
         *,
         pipeline: Optional[PipelineManager] = None,
         image: Optional[np.ndarray] = None,
         description: str = "Processing image",
-        on_finished: Optional[Callable[[np.ndarray], None]] = None,
+        on_finished: Optional[Callable[[PipelineCacheResult], None]] = None,
         on_canceled: Optional[Callable[[], None]] = None,
     ) -> None:
         if pipeline is None:
             pipeline = self.pipeline
+        if pipeline is None:
+            return
         if image is None:
             if self.base_image is None:
                 return
             image = self.base_image
 
-        def _handle_finished(result: np.ndarray) -> None:
+        source_id = self._ensure_source_registered(image)
+        if source_id is None:
+            return
+
+        steps = tuple(step.clone() for step in pipeline.steps)
+
+        def _handle_finished(result: PipelineCacheResult) -> None:
             if on_finished is not None:
                 on_finished(result)
 
@@ -1141,9 +1231,17 @@ class MainWindow(QtWidgets.QMainWindow):
             if on_canceled is not None:
                 on_canceled()
 
-        self.thread_controller.run_pipeline(
-            pipeline,
-            image,
+        def _task(cancel_event: threading.Event, progress: Callable[[int], None]):
+            return self.pipeline_cache.compute(
+                source_id=source_id,
+                image=image,
+                steps=steps,
+                cancel_event=cancel_event,
+                progress=progress,
+            )
+
+        self.thread_controller.run_task(
+            _task,
             description=description,
             on_finished=_handle_finished,
             on_canceled=_handle_canceled,
@@ -1178,19 +1276,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_parameter_dialogs[key] = dialog
         dialog.open()
 
-    def _update_preview_from_result(self, image: np.ndarray) -> None:
-        self.current_preview = image.copy()
+    def _update_preview_from_result(self, result: PipelineCacheResult) -> None:
+        self._preview_signature = result.final_signature
+        self.current_preview = result.image.copy()
         self.preview_display.set_image(self.current_preview)
 
-    def _update_committed_from_result(self, image: np.ndarray) -> None:
-        self.committed_image = image.copy()
+    def _update_committed_from_result(self, result: PipelineCacheResult) -> None:
+        self.committed_image = result.image.copy()
         self.current_preview = self.committed_image.copy()
         self.preview_display.set_image(self.current_preview)
+        self._committed_signature = result.final_signature
+        self._preview_signature = result.final_signature
+        self._last_pipeline_metadata = result.metadata
         self.update_undo_redo_actions()
+        try:
+            autosave = self.app_core.autosave
+        except RuntimeError:
+            autosave = None
+        if autosave is not None and self.committed_image is not None:
+            pipeline_payload = {"stage": "preprocessing", **self.pipeline_manager.to_dict()}
+            pipeline_payload["cache_signature"] = result.final_signature
+            metadata: Dict[str, Any] = {
+                "stage": "preprocessing",
+                "mode": "single",
+                "cache": result.metadata,
+            }
+            if self.current_image_path:
+                metadata.setdefault("source", {})["input"] = self.current_image_path
+            autosave.mark_dirty(self.committed_image, pipeline_payload, metadata=metadata)
 
     def reset_all(self):
         backup = None if self.committed_image is None else self.committed_image.copy()
-        self.pipeline_manager.push_state(image=backup)
+        self.pipeline_manager.push_state(
+            image=backup, cache_signature=self._committed_signature
+        )
         self.pipeline_manager.replace_steps(
             self.pipeline_manager.template_steps(), preserve_history=True
         )
@@ -1202,8 +1321,8 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         self.update_undo_redo_actions()
 
-    def _on_reset_completed(self, image: np.ndarray) -> None:
-        self._update_committed_from_result(image)
+    def _on_reset_completed(self, result: PipelineCacheResult) -> None:
+        self._update_committed_from_result(result)
         self.statusBar().showMessage("Reset all processing to defaults.", 3000)
 
     def mass_preprocess(self):
@@ -1324,13 +1443,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 payload = Path(filename).read_text(encoding="utf-8")
                 data = json.loads(payload)
                 self.pipeline_manager.push_state(
-                    image=None if self.committed_image is None else self.committed_image.copy()
+                    image=None if self.committed_image is None else self.committed_image.copy(),
+                    cache_signature=self._committed_signature,
                 )
                 self.app_core.load_preprocessing_pipeline(data)
                 self.rebuild_pipeline()
                 if self.base_image is not None:
-                    def _applied(image: np.ndarray) -> None:
-                        self._update_committed_from_result(image)
+                    def _applied(result: PipelineCacheResult) -> None:
+                        self._update_committed_from_result(result)
                         QtWidgets.QMessageBox.information(
                             self,
                             "Pipeline Import",
@@ -1363,18 +1483,22 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load image: {exc}")
             return
 
+        if self._source_id is not None:
+            self.pipeline_cache.discard_cache(self._source_id)
         self.original_image = image.copy()
         self.base_image = image.copy()
         self.committed_image = image.copy()
         self.current_image_path = filename
+        self._source_id = self.pipeline_cache.register_source(self.base_image, hint=filename)
+        self._committed_signature = self._source_id
+        self._preview_signature = self._source_id
+        self._last_pipeline_metadata = self.pipeline_cache.metadata_for(
+            self._source_id, self._source_id
+        )
         self.pipeline = build_preprocessing_pipeline(self.app_core, self.pipeline_manager)
         self.original_display.set_image(self.original_image)
         self.preview_display.set_image(self.base_image)
-        self._apply_pipeline_async(
-            image=self.base_image,
-            description="Generating preview",
-            on_finished=self._update_preview_from_result,
-        )
+        self.update_preview()
         self.pipeline_manager.clear_history()
         self.update_undo_redo_actions()
         self.statusBar().showMessage(f"Loaded image: {filename}")
@@ -1389,6 +1513,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if filename:
             io_manager = self.app_core.io_manager
             pipeline_metadata = {"stage": "preprocessing", **self.pipeline_manager.to_dict()}
+            if self._committed_signature is not None:
+                pipeline_metadata["cache_signature"] = self._committed_signature
             settings_snapshot = self.app_core.settings.snapshot(prefix="preprocess/")
             metadata: Dict[str, Any] = {
                 "stage": "preprocessing",
@@ -1396,6 +1522,10 @@ class MainWindow(QtWidgets.QMainWindow):
             }
             if self.current_image_path:
                 metadata["source"] = {"input": self.current_image_path}
+            if self._committed_signature is not None:
+                metadata["result_signature"] = self._committed_signature
+            if self._last_pipeline_metadata:
+                metadata["cache"] = self._last_pipeline_metadata
             result = io_manager.save_image(
                 filename,
                 self.committed_image,
@@ -1406,15 +1536,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"Saved processed image to: {result.image_path}")
 
     def update_preview(self):
-        if self.base_image is not None:
-            self._apply_pipeline_async(
-                description="Updating preview",
-                on_finished=self._update_preview_from_result,
-            )
+        if self.base_image is None or self._source_id is None or self.pipeline is None:
+            return
+        steps = tuple(step.clone() for step in self.pipeline.steps)
+        final_signature, _ = self.pipeline_cache.predict(self._source_id, steps)
+        cached = self.pipeline_cache.get_cached_image(self._source_id, final_signature)
+        if cached is not None:
+            self._preview_signature = final_signature
+            self.current_preview = cached.copy()
+            self.preview_display.set_image(self.current_preview)
+            return
+        self._apply_pipeline_async(
+            description="Updating preview",
+            on_finished=self._update_preview_from_result,
+        )
 
     def toggle_grayscale(self):
         backup = None if self.committed_image is None else self.committed_image.copy()
-        self.pipeline_manager.push_state(image=backup)
+        self.pipeline_manager.push_state(
+            image=backup, cache_signature=self._committed_signature
+        )
         self.pipeline_manager.toggle_step("Grayscale")
         self.rebuild_pipeline()
         if self.base_image is not None:
@@ -1425,7 +1566,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_undo_redo_actions()
 
     def preview_update(self, func_name: str, temp_params: Dict[str, Any]):
-        if self.base_image is None:
+        if self.base_image is None or self._source_id is None:
             return
         temp_manager = self.pipeline_manager.clone()
         try:
@@ -1436,9 +1577,16 @@ class MainWindow(QtWidgets.QMainWindow):
         step.params.update(temp_params)
         if func_name == "Crop":
             step.params["apply_crop"] = False
-        temp_pipeline = build_preprocessing_pipeline(self.app_core, temp_manager)
+        steps = tuple(step.clone() for step in temp_manager.steps)
+        final_signature, _ = self.pipeline_cache.predict(self._source_id, steps)
+        cached = self.pipeline_cache.get_cached_image(self._source_id, final_signature)
+        if cached is not None:
+            self._preview_signature = final_signature
+            self.current_preview = cached.copy()
+            self.preview_display.set_image(self.current_preview)
+            return
         self._apply_pipeline_async(
-            pipeline=temp_pipeline,
+            pipeline=temp_manager,
             description="Updating preview",
             on_finished=self._update_preview_from_result,
         )
@@ -1455,7 +1603,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _apply() -> None:
             new_alpha, new_beta = dlg.get_values()
-            self.pipeline_manager.push_state(image=backup)
+            self.pipeline_manager.push_state(
+                image=backup, cache_signature=self._committed_signature
+            )
             self.pipeline_manager.set_step_enabled("BrightnessContrast", True)
             self.pipeline_manager.update_step_params(
                 "BrightnessContrast", {"alpha": new_alpha, "beta": new_beta}
@@ -1493,7 +1643,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _apply() -> None:
             new_gamma = dlg.get_value()
-            self.pipeline_manager.push_state(image=backup)
+            self.pipeline_manager.push_state(
+                image=backup, cache_signature=self._committed_signature
+            )
             self.pipeline_manager.set_step_enabled("Gamma", True)
             self.pipeline_manager.update_step_params("Gamma", {"gamma": new_gamma})
             self.rebuild_pipeline()
@@ -1532,7 +1684,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _apply() -> None:
             new_alpha, new_beta = dlg.get_values()
-            self.pipeline_manager.push_state(image=backup)
+            self.pipeline_manager.push_state(
+                image=backup, cache_signature=self._committed_signature
+            )
             self.pipeline_manager.set_step_enabled("IntensityNormalization", True)
             self.pipeline_manager.update_step_params(
                 "IntensityNormalization", {"alpha": new_alpha, "beta": new_beta}
@@ -1571,7 +1725,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _apply() -> None:
             new_method, new_ksize = dlg.get_values()
-            self.pipeline_manager.push_state(image=backup)
+            self.pipeline_manager.push_state(
+                image=backup, cache_signature=self._committed_signature
+            )
             self.pipeline_manager.set_step_enabled("NoiseReduction", True)
             self.pipeline_manager.update_step_params(
                 "NoiseReduction", {"method": new_method, "ksize": new_ksize}
@@ -1609,7 +1765,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _apply() -> None:
             new_strength = dlg.get_value()
-            self.pipeline_manager.push_state(image=backup)
+            self.pipeline_manager.push_state(
+                image=backup, cache_signature=self._committed_signature
+            )
             self.pipeline_manager.set_step_enabled("Sharpen", True)
             self.pipeline_manager.update_step_params(
                 "Sharpen", {"strength": new_strength}
@@ -1647,7 +1805,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _apply() -> None:
             new_channel = dlg.get_value()
-            self.pipeline_manager.push_state(image=backup)
+            self.pipeline_manager.push_state(
+                image=backup, cache_signature=self._committed_signature
+            )
             self.pipeline_manager.set_step_enabled("SelectChannel", True)
             self.pipeline_manager.update_step_params(
                 "SelectChannel", {"channel": new_channel}
@@ -1701,7 +1861,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _apply() -> None:
             new_x, new_y, new_width, new_height = dlg.get_values()
-            self.pipeline_manager.push_state(image=backup)
+            self.pipeline_manager.push_state(
+                image=backup, cache_signature=self._committed_signature
+            )
             self.pipeline_manager.set_step_enabled("Crop", True)
             self.pipeline_manager.update_step_params(
                 "Crop",

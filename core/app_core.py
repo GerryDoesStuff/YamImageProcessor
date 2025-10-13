@@ -18,6 +18,7 @@ from .persistence import AutosaveManager
 from .settings import SettingsManager
 
 from .logging import init_logging
+from processing.pipeline_cache import PipelineCache
 from processing.pipeline_manager import PipelineManager, PipelineStep
 
 
@@ -59,6 +60,7 @@ class AppCore:
         self._bootstrapped = False
         self._preprocessing_manager: Optional[PipelineManager] = None
         self._preprocessing_templates: Dict[str, PipelineStep] = {}
+        self._pipeline_cache: Optional[PipelineCache] = None
 
     # ------------------------------------------------------------------
     # Lifecycle management
@@ -140,6 +142,14 @@ class AppCore:
 
     # ------------------------------------------------------------------
     # Pipeline helpers
+    @property
+    def pipeline_cache(self) -> PipelineCache:
+        if self._pipeline_cache is None:
+            if self.settings_manager is None:
+                raise RuntimeError("Settings manager not initialised. Call bootstrap() first.")
+            self._pipeline_cache = PipelineCache(self.settings_manager)
+        return self._pipeline_cache
+
     def get_preprocessing_pipeline_manager(self) -> PipelineManager:
         if self._preprocessing_manager is None:
             templates: Dict[str, PipelineStep] = {}
@@ -202,6 +212,7 @@ class AppCore:
             self.config.application,
             defaults=defaults,
         )
+        self._pipeline_cache = PipelineCache(self.settings_manager)
         stored_diagnostics = self.settings_manager.get(
             "diagnostics/enabled", self.config.diagnostics_enabled
         )
