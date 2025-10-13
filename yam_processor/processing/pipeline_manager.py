@@ -23,7 +23,14 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class StepExecutionMetadata:
-    """Hints controlling how a :class:`PipelineStep` should be executed."""
+    """Hints controlling how a :class:`PipelineStep` should be executed.
+
+    The ``requires_gpu`` flag is the primary signal consumed by upcoming GPU
+    dispatch logic (see :mod:`docs.performance_roadmap`). Pipelines should
+    continue to populate this metadata even while the CPU fallback remains in
+    place so that the transition to accelerator aware execution can be driven by
+    configuration rather than invasive code changes.
+    """
 
     supports_inplace: bool = False
     requires_gpu: bool = False
@@ -46,7 +53,14 @@ class StepExecutionMetadata:
 
 
 class GpuExecutor(Protocol):
-    """Protocol describing GPU execution helpers."""
+    """Protocol describing GPU execution helpers.
+
+    Implementations act as the bridge between :class:`PipelineStep` instances
+    and optimised OpenCV or scikit-image kernels. The migration plan involves
+    providing adapters that can accept a step and orchestrate device transfers
+    before invoking the accelerated operator, falling back to the step's CPU
+    ``function`` when no backend is available.
+    """
 
     def execute(
         self,
@@ -413,6 +427,8 @@ class PipelineManager:
     def set_gpu_executor(self, executor: Optional[GpuExecutor]) -> None:
         """Register the accelerator used for GPU-only steps."""
 
+        # TODO(gpu): Extend this setter to perform capability checks against
+        # module metadata once the GPU executor exposes backend descriptors.
         self._gpu_executor = executor
 
     # ------------------------------------------------------------------
@@ -640,6 +656,9 @@ class PipelineManager:
                     "Step '%s' requires GPU execution but no executor is configured; falling back to CPU.",
                     step.name,
                 )
+                # TODO(gpu): Swap this temporary branch for the unified GPU
+                # dispatcher outlined in docs/performance_roadmap.md once the
+                # executor can invoke OpenCV/scikit-image kernels directly.
                 result = step.function(image, **step.params)
             else:
                 result = self._gpu_executor.execute(step, image)

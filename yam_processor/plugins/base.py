@@ -50,7 +50,12 @@ class ModuleCapabilities:
     and attach it when creating :class:`~yam_processor.processing.PipelineStep`
     instances. Keeping the module-level capability flags and per-step metadata
     aligned helps user interfaces communicate the module's execution
-    characteristics accurately.
+    characteristics accurately. Upcoming GPU integration work will validate that
+    ``ModuleCapabilities.requires_gpu`` is set whenever the corresponding
+    ``PipelineStep`` expects accelerator execution (see
+    :mod:`docs.performance_roadmap` for migration details), ensuring the
+    :class:`~yam_processor.processing.PipelineManager` can hand control to the
+    configured GPU executor.
     """
 
     supports_batch: bool = False
@@ -81,6 +86,13 @@ class ModuleBase(ABC):
         """Advertised capability flags for the module.
 
         Sub-classes may override to expose stage specific flags.
+
+        GPU-enabled modules should override this property to declare when a
+        CUDA/ROCm implementation is mandatory so that
+        :class:`~yam_processor.processing.PipelineManager` can route their
+        :class:`~yam_processor.processing.PipelineStep` instances through the GPU
+        executor once the integration described in
+        :mod:`docs.performance_roadmap` lands.
         """
 
         return ModuleCapabilities()
