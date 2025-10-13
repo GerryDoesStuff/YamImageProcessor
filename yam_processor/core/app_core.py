@@ -7,7 +7,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 from PyQt5 import QtCore  # type: ignore
 
@@ -46,6 +46,9 @@ class AppConfiguration:
     )
     translation_locales: Sequence[str] = ()
     translation_file_prefix: str = "yam_processor"
+    enable_update_checks: bool = False
+    telemetry_opt_in: bool = False
+    telemetry_settings_key: str = "telemetry/opt_in"
 
 
 class AppCore:
@@ -63,6 +66,8 @@ class AppCore:
         self.module_registry: ModuleRegistry = ModuleRegistry()
         self.translators: list[QtCore.QTranslator] = []
         self.session_temp_dir: Optional[Path] = None
+        self.telemetry_enabled: bool = False
+        self.telemetry_setting_key: str = self.config.telemetry_settings_key
 
     def bootstrap(self) -> None:
         """Initialise all core systems."""
@@ -71,10 +76,25 @@ class AppCore:
         self._init_logging()
         self.logger.info("Bootstrapping application core", extra={"component": "AppCore"})
         self._init_settings()
+        self.telemetry_enabled = self._resolve_telemetry_opt_in()
         self._init_translations()
         self._init_persistence()
         self._init_threading()
         self._discover_plugins()
+        if self.config.enable_update_checks:
+            self.check_for_updates()
+        else:
+            self.logger.debug(
+                "Update checks disabled by configuration",
+                extra={"component": "AppCore"},
+            )
+        if self.telemetry_enabled:
+            self.configure_telemetry()
+        else:
+            self.logger.debug(
+                "Telemetry disabled (opt-in not granted)",
+                extra={"component": "AppCore"},
+            )
 
     def shutdown(self) -> None:
         """Shutdown routine for releasing resources gracefully."""
@@ -296,3 +316,82 @@ class AppCore:
             "Plugin discovery complete",
             extra={"component": "AppCore", "count": len(self.plugins)},
         )
+
+    def check_for_updates(self) -> None:
+        """Invoke the update polling hook when explicitly enabled."""
+
+        version = self._current_version()
+        self.logger.info(
+            "Update check requested",
+            extra={"component": "AppCore", "version": version},
+        )
+
+    def configure_telemetry(self) -> None:
+        """Enable telemetry emission when the user has opted in."""
+
+        if self.settings is None:
+            self.logger.debug(
+                "Telemetry configuration skipped (no settings manager)",
+                extra={"component": "AppCore"},
+            )
+            return
+
+        key = self.telemetry_setting_key
+        self.settings.set(key, True)
+        self.telemetry_enabled = True
+        version = self._current_version()
+        self.logger.info(
+            "Telemetry opt-in active",
+            extra={"component": "AppCore", "version": version, "settings_key": key},
+        )
+
+    def _resolve_telemetry_opt_in(self) -> bool:
+        if self.settings is None:
+            return bool(self.config.telemetry_opt_in)
+
+        key = self.telemetry_setting_key
+        sentinel = object()
+        stored_value = self.settings.get(key, sentinel)
+        if stored_value is sentinel:
+            enabled = bool(self.config.telemetry_opt_in)
+            self.settings.set(key, enabled)
+            return enabled
+
+        try:
+            enabled = self._coerce_bool(stored_value)
+        except ValueError:
+            enabled = bool(self.config.telemetry_opt_in)
+            self.settings.set(key, enabled)
+            self.logger.warning(
+                "Invalid telemetry opt-in setting encountered; reverting to default",
+                extra={"component": "AppCore", "settings_key": key},
+            )
+        else:
+            if enabled not in (True, False):  # pragma: no cover - defensive branch
+                enabled = bool(enabled)
+        self.settings.set(key, enabled)
+        return enabled
+
+    @staticmethod
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalised = value.strip().lower()
+            if normalised in {"1", "true", "yes", "on"}:
+                return True
+            if normalised in {"0", "false", "no", "off"}:
+                return False
+            raise ValueError(f"Cannot interpret string as boolean: {value!r}")
+        return bool(value)
+
+    @staticmethod
+    def _current_version() -> str:
+        try:
+            from yam_processor import get_version
+        except Exception:  # pragma: no cover - circular import safety
+            return "unknown"
+        try:
+            return get_version()
+        except Exception:  # pragma: no cover - fallback handling
+            return "unknown"

@@ -52,6 +52,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_accessibility_preferences()
 
         self._logger = logging.getLogger(__name__)
+        self._app_version = self._resolve_app_version()
         self._thread_controller: Optional[ThreadController] = thread_controller
         self._pipeline_controller: Optional[PipelineController] = None
         if pipeline_controller is not None:
@@ -116,9 +117,31 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_status_message(self, message: str, timeout_ms: int = 0) -> None:
         self.statusBar().showMessage(message, timeout_ms)
 
+    def show_about_dialog(self) -> None:
+        """Display an about dialog including version metadata and opt-in notice."""
+
+        version = self._app_version or "unknown"
+        title = self.tr("About Yam Image Processor")
+        body = self.tr(
+            "<p><strong>Yam Image Processor</strong></p>"
+            "<p>Version: {version}</p>"
+            "<p>Telemetry is disabled unless explicitly enabled in settings.</p>"
+        ).format(version=version)
+        QtWidgets.QMessageBox.about(self, title, body)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _resolve_app_version(self) -> str:
+        try:
+            from yam_processor import get_version
+        except Exception:  # pragma: no cover - fallback for circular imports
+            return "unknown"
+        try:
+            return get_version()
+        except Exception:  # pragma: no cover - metadata access safety
+            return "unknown"
+
     def _build_status_bar(self) -> None:
         status_bar = QtWidgets.QStatusBar(self)
         status_bar.setSizeGripEnabled(True)
@@ -189,10 +212,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.about_action = QtWidgets.QAction(self.tr("&About"), self)
         self.about_action.setIcon(load_icon("about"))
-        self.about_action.setStatusTip(
-            self.tr("Show information about Yam Image Processor")
-        )
-        self.about_action.triggered.connect(self.aboutRequested.emit)
+        about_status = self.tr("Show information about Yam Image Processor")
+        if self._app_version and self._app_version != "unknown":
+            about_status = self.tr(
+                "Show information about Yam Image Processor (version {version})"
+            ).format(version=self._app_version)
+        self.about_action.setStatusTip(about_status)
+        self.about_action.triggered.connect(self._on_about_triggered)
 
         self.focus_diagnostics_action = QtWidgets.QAction(
             self.tr("Focus Diagnostics"), self
@@ -373,7 +399,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not hasattr(self, "open_project_action"):
             return
 
-        tooltips = build_main_window_tooltips(self._pipeline_controller)
+        tooltips = build_main_window_tooltips(
+            self._pipeline_controller, version=self._app_version
+        )
         action_mapping = {
             "open_project": getattr(self, "open_project_action", None),
             "save_project": getattr(self, "save_project_action", None),
@@ -542,6 +570,10 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.pyqtSlot()
     def _on_open_project(self) -> None:
         self.openProjectRequested.emit()
+
+    def _on_about_triggered(self) -> None:
+        self.show_about_dialog()
+        self.aboutRequested.emit()
 
     @QtCore.pyqtSlot()
     def _on_save_project(self) -> None:
