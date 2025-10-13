@@ -56,10 +56,16 @@ class ImageDisplayWidget(QtWidgets.QLabel):
 
 
 class BrightnessContrastDialog(QtWidgets.QDialog):
-    def __init__(self, alpha: float = 1.0, beta: int = 0, preview_callback: Optional[Callable[[float, int], None]] = None):
+    parametersChanged = QtCore.pyqtSignal(float, int)
+
+    def __init__(
+        self,
+        alpha: float = 1.0,
+        beta: int = 0,
+        preview_callback: Optional[Callable[[float, int], None]] = None,
+    ):
         super().__init__()
         self.setWindowTitle("Brightness / Contrast")
-        self.preview_callback = preview_callback
         self.initial_alpha = alpha
         self.initial_beta = beta
 
@@ -91,9 +97,12 @@ class BrightnessContrastDialog(QtWidgets.QDialog):
         self.apply_btn.clicked.connect(self.accept)
         self.cancel_btn.clicked.connect(self.reject)
 
+        if preview_callback is not None:
+            self.parametersChanged.connect(preview_callback)
+
     def on_value_changed(self):
-        if self.preview_callback:
-            self.preview_callback(self.alpha_spin.value(), self.beta_spin.value())
+        alpha, beta = self.get_values()
+        self.parametersChanged.emit(alpha, beta)
 
     def get_values(self) -> Tuple[float, int]:
         return self.alpha_spin.value(), self.beta_spin.value()
@@ -104,10 +113,15 @@ class BrightnessContrastDialog(QtWidgets.QDialog):
 
 
 class GammaDialog(QtWidgets.QDialog):
-    def __init__(self, gamma: float = 1.0, preview_callback: Optional[Callable[[float], None]] = None):
+    parametersChanged = QtCore.pyqtSignal(float)
+
+    def __init__(
+        self,
+        gamma: float = 1.0,
+        preview_callback: Optional[Callable[[float], None]] = None,
+    ):
         super().__init__()
         self.setWindowTitle("Gamma Correction")
-        self.preview_callback = preview_callback
         self.initial_gamma = gamma
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -132,9 +146,11 @@ class GammaDialog(QtWidgets.QDialog):
         self.apply_btn.clicked.connect(self.accept)
         self.cancel_btn.clicked.connect(self.reject)
 
+        if preview_callback is not None:
+            self.parametersChanged.connect(preview_callback)
+
     def on_value_changed(self):
-        if self.preview_callback:
-            self.preview_callback(self.gamma_spin.value())
+        self.parametersChanged.emit(self.gamma_spin.value())
 
     def get_value(self) -> float:
         return self.gamma_spin.value()
@@ -144,10 +160,16 @@ class GammaDialog(QtWidgets.QDialog):
 
 
 class NormalizeDialog(QtWidgets.QDialog):
-    def __init__(self, alpha: int = 0, beta: int = 255, preview_callback: Optional[Callable[[int, int], None]] = None):
+    parametersChanged = QtCore.pyqtSignal(int, int)
+
+    def __init__(
+        self,
+        alpha: int = 0,
+        beta: int = 255,
+        preview_callback: Optional[Callable[[int, int], None]] = None,
+    ):
         super().__init__()
         self.setWindowTitle("Intensity Normalization")
-        self.preview_callback = preview_callback
         self.initial_alpha = alpha
         self.initial_beta = beta
 
@@ -178,9 +200,12 @@ class NormalizeDialog(QtWidgets.QDialog):
         self.apply_btn.clicked.connect(self.accept)
         self.cancel_btn.clicked.connect(self.reject)
 
+        if preview_callback is not None:
+            self.parametersChanged.connect(preview_callback)
+
     def on_value_changed(self):
-        if self.preview_callback:
-            self.preview_callback(self.alpha_spin.value(), self.beta_spin.value())
+        alpha, beta = self.get_values()
+        self.parametersChanged.emit(alpha, beta)
 
     def get_values(self) -> Tuple[int, int]:
         return self.alpha_spin.value(), self.beta_spin.value()
@@ -191,10 +216,16 @@ class NormalizeDialog(QtWidgets.QDialog):
 
 
 class NoiseReductionDialog(QtWidgets.QDialog):
-    def __init__(self, method: str = "Gaussian", ksize: int = 5, preview_callback: Optional[Callable[[str, int], None]] = None):
+    parametersChanged = QtCore.pyqtSignal(str, int)
+
+    def __init__(
+        self,
+        method: str = "Gaussian",
+        ksize: int = 5,
+        preview_callback: Optional[Callable[[str, int], None]] = None,
+    ):
         super().__init__()
         self.setWindowTitle("Noise Reduction")
-        self.preview_callback = preview_callback
         self.initial_method = method
         self.initial_ksize = ksize
 
@@ -226,9 +257,12 @@ class NoiseReductionDialog(QtWidgets.QDialog):
         self.apply_btn.clicked.connect(self.accept)
         self.cancel_btn.clicked.connect(self.reject)
 
+        if preview_callback is not None:
+            self.parametersChanged.connect(preview_callback)
+
     def on_value_changed(self):
-        if self.preview_callback:
-            self.preview_callback(self.method_combo.currentText(), self.ksize_spin.value())
+        method, ksize = self.get_values()
+        self.parametersChanged.emit(method, ksize)
 
     def get_values(self) -> Tuple[str, int]:
         return self.method_combo.currentText(), self.ksize_spin.value()
@@ -239,10 +273,15 @@ class NoiseReductionDialog(QtWidgets.QDialog):
 
 
 class SharpenDialog(QtWidgets.QDialog):
-    def __init__(self, strength: float = 1.0, preview_callback: Optional[Callable[[float], None]] = None):
+    parametersChanged = QtCore.pyqtSignal(float)
+
+    def __init__(
+        self,
+        strength: float = 1.0,
+        preview_callback: Optional[Callable[[float], None]] = None,
+    ):
         super().__init__()
         self.setWindowTitle("Sharpen")
-        self.preview_callback = preview_callback
         self.initial_strength = strength
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -267,9 +306,11 @@ class SharpenDialog(QtWidgets.QDialog):
         self.apply_btn.clicked.connect(self.accept)
         self.cancel_btn.clicked.connect(self.reject)
 
+        if preview_callback is not None:
+            self.parametersChanged.connect(preview_callback)
+
     def on_value_changed(self):
-        if self.preview_callback:
-            self.preview_callback(self.strength_spin.value())
+        self.parametersChanged.emit(self.strength_spin.value())
 
     def get_value(self) -> float:
         return self.strength_spin.value()
@@ -279,10 +320,15 @@ class SharpenDialog(QtWidgets.QDialog):
 
 
 class SelectChannelDialog(QtWidgets.QDialog):
-    def __init__(self, current_channel: str = "All", preview_callback: Optional[Callable[[str], None]] = None):
+    parametersChanged = QtCore.pyqtSignal(str)
+
+    def __init__(
+        self,
+        current_channel: str = "All",
+        preview_callback: Optional[Callable[[str], None]] = None,
+    ):
         super().__init__()
         self.setWindowTitle("Select Color Channel")
-        self.preview_callback = preview_callback
         self.initial_channel = current_channel
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -303,9 +349,11 @@ class SelectChannelDialog(QtWidgets.QDialog):
         self.apply_btn.clicked.connect(self.accept)
         self.cancel_btn.clicked.connect(self.reject)
 
+        if preview_callback is not None:
+            self.parametersChanged.connect(preview_callback)
+
     def on_value_changed(self):
-        if self.preview_callback:
-            self.preview_callback(self.channel_combo.currentText())
+        self.parametersChanged.emit(self.channel_combo.currentText())
 
     def get_value(self) -> str:
         return self.channel_combo.currentText()
@@ -315,6 +363,8 @@ class SelectChannelDialog(QtWidgets.QDialog):
 
 
 class CropDialog(QtWidgets.QDialog):
+    parametersChanged = QtCore.pyqtSignal(int, int, int, int)
+
     def __init__(
         self,
         x_offset: int = 0,
@@ -325,7 +375,6 @@ class CropDialog(QtWidgets.QDialog):
     ):
         super().__init__()
         self.setWindowTitle("Crop")
-        self.preview_callback = preview_callback
         self.initial_x = x_offset
         self.initial_y = y_offset
         self.initial_width = width
@@ -370,14 +419,16 @@ class CropDialog(QtWidgets.QDialog):
         self.apply_btn.clicked.connect(self.accept)
         self.cancel_btn.clicked.connect(self.reject)
 
+        if preview_callback is not None:
+            self.parametersChanged.connect(preview_callback)
+
     def on_value_changed(self):
-        if self.preview_callback:
-            self.preview_callback(
-                self.x_spin.value(),
-                self.y_spin.value(),
-                self.width_spin.value(),
-                self.height_spin.value(),
-            )
+        self.parametersChanged.emit(
+            self.x_spin.value(),
+            self.y_spin.value(),
+            self.width_spin.value(),
+            self.height_spin.value(),
+        )
 
     def get_values(self) -> Tuple[int, int, int, int]:
         return (
@@ -419,6 +470,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.thread_controller: ThreadController = self.app_core.thread_controller
         self._progress_dialog: Optional[QtWidgets.QProgressDialog] = None
         self._register_thread_signals()
+        # Track floating parameter editors so they can eventually be migrated into
+        # docked widgets that share the asynchronous preview stream (see Issue #1).
+        self._active_parameter_dialogs: Dict[str, QtWidgets.QDialog] = {}
+        self._parameter_stream_sources: Dict[str, Any] = {}
 
         self.image_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal, self)
         self.setCentralWidget(self.image_splitter)
@@ -1093,6 +1148,35 @@ class MainWindow(QtWidgets.QMainWindow):
             on_canceled=_handle_canceled,
         )
 
+    def _present_parameter_dialog(
+        self,
+        key: str,
+        dialog: QtWidgets.QDialog,
+        *,
+        on_accept: Callable[[], None],
+        on_cancel: Optional[Callable[[], None]] = None,
+        on_parameters_changed: Optional[Callable[..., None]] = None,
+    ) -> None:
+        existing = self._active_parameter_dialogs.pop(key, None)
+        if existing is not None:
+            existing.close()
+        dialog.setModal(True)
+        dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        if on_parameters_changed is not None and hasattr(dialog, "parametersChanged"):
+            dialog.parametersChanged.connect(on_parameters_changed)  # type: ignore[attr-defined]
+            self._parameter_stream_sources[key] = dialog.parametersChanged  # type: ignore[attr-defined]
+        dialog.accepted.connect(on_accept)
+        if on_cancel is not None:
+            dialog.rejected.connect(on_cancel)
+
+        def _cleanup(_result: int) -> None:
+            self._active_parameter_dialogs.pop(key, None)
+            self._parameter_stream_sources.pop(key, None)
+
+        dialog.finished.connect(_cleanup)
+        self._active_parameter_dialogs[key] = dialog
+        dialog.open()
+
     def _update_preview_from_result(self, image: np.ndarray) -> None:
         self.current_preview = image.copy()
         self.preview_display.set_image(self.current_preview)
@@ -1330,14 +1414,12 @@ class MainWindow(QtWidgets.QMainWindow):
         step = self.pipeline_manager.get_step("BrightnessContrast")
         current_alpha = float(step.params.get("alpha", 1.0))
         current_beta = int(step.params.get("beta", 0))
-        dlg = BrightnessContrastDialog(
-            alpha=current_alpha,
-            beta=current_beta,
-            preview_callback=lambda a, b: self.preview_update(
-                "BrightnessContrast", {"alpha": a, "beta": b}
-            ),
-        )
-        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+        dlg = BrightnessContrastDialog(alpha=current_alpha, beta=current_beta)
+
+        def _preview(alpha: float, beta: int) -> None:
+            self.preview_update("BrightnessContrast", {"alpha": alpha, "beta": beta})
+
+        def _apply() -> None:
             new_alpha, new_beta = dlg.get_values()
             self.pipeline_manager.push_state(image=backup)
             self.pipeline_manager.set_step_enabled("BrightnessContrast", True)
@@ -1351,19 +1433,31 @@ class MainWindow(QtWidgets.QMainWindow):
                     on_finished=self._update_committed_from_result,
                 )
             self.update_undo_redo_actions()
-        else:
+
+        def _cancel() -> None:
             if backup is not None:
                 self.preview_display.set_image(backup)
+            elif self.base_image is not None:
+                self.update_preview()
+
+        self._present_parameter_dialog(
+            "brightness_contrast",
+            dlg,
+            on_accept=_apply,
+            on_cancel=_cancel,
+            on_parameters_changed=_preview,
+        )
 
     def show_gamma_dialog(self):
         backup = None if self.committed_image is None else self.committed_image.copy()
         step = self.pipeline_manager.get_step("Gamma")
         current_gamma = float(step.params.get("gamma", 1.0))
-        dlg = GammaDialog(
-            gamma=current_gamma,
-            preview_callback=lambda g: self.preview_update("Gamma", {"gamma": g}),
-        )
-        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+        dlg = GammaDialog(gamma=current_gamma)
+
+        def _preview(gamma: float) -> None:
+            self.preview_update("Gamma", {"gamma": gamma})
+
+        def _apply() -> None:
             new_gamma = dlg.get_value()
             self.pipeline_manager.push_state(image=backup)
             self.pipeline_manager.set_step_enabled("Gamma", True)
@@ -1375,23 +1469,34 @@ class MainWindow(QtWidgets.QMainWindow):
                     on_finished=self._update_committed_from_result,
                 )
             self.update_undo_redo_actions()
-        else:
+
+        def _cancel() -> None:
             if backup is not None:
                 self.preview_display.set_image(backup)
+            elif self.base_image is not None:
+                self.update_preview()
+
+        self._present_parameter_dialog(
+            "gamma",
+            dlg,
+            on_accept=_apply,
+            on_cancel=_cancel,
+            on_parameters_changed=_preview,
+        )
 
     def show_normalize_dialog(self):
         backup = None if self.committed_image is None else self.committed_image.copy()
         step = self.pipeline_manager.get_step("IntensityNormalization")
         current_alpha = int(step.params.get("alpha", 0))
         current_beta = int(step.params.get("beta", 255))
-        dlg = NormalizeDialog(
-            alpha=current_alpha,
-            beta=current_beta,
-            preview_callback=lambda a, b: self.preview_update(
-                "IntensityNormalization", {"alpha": a, "beta": b}
-            ),
-        )
-        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+        dlg = NormalizeDialog(alpha=current_alpha, beta=current_beta)
+
+        def _preview(alpha: int, beta: int) -> None:
+            self.preview_update(
+                "IntensityNormalization", {"alpha": alpha, "beta": beta}
+            )
+
+        def _apply() -> None:
             new_alpha, new_beta = dlg.get_values()
             self.pipeline_manager.push_state(image=backup)
             self.pipeline_manager.set_step_enabled("IntensityNormalization", True)
@@ -1405,23 +1510,32 @@ class MainWindow(QtWidgets.QMainWindow):
                     on_finished=self._update_committed_from_result,
                 )
             self.update_undo_redo_actions()
-        else:
+
+        def _cancel() -> None:
             if backup is not None:
                 self.preview_display.set_image(backup)
+            elif self.base_image is not None:
+                self.update_preview()
+
+        self._present_parameter_dialog(
+            "normalize",
+            dlg,
+            on_accept=_apply,
+            on_cancel=_cancel,
+            on_parameters_changed=_preview,
+        )
 
     def show_noise_reduction_dialog(self):
         backup = None if self.committed_image is None else self.committed_image.copy()
         step = self.pipeline_manager.get_step("NoiseReduction")
         current_method = step.params.get("method", "Gaussian")
         current_ksize = int(step.params.get("ksize", 5))
-        dlg = NoiseReductionDialog(
-            method=current_method,
-            ksize=current_ksize,
-            preview_callback=lambda m, k: self.preview_update(
-                "NoiseReduction", {"method": m, "ksize": k}
-            ),
-        )
-        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+        dlg = NoiseReductionDialog(method=current_method, ksize=current_ksize)
+
+        def _preview(method: str, ksize: int) -> None:
+            self.preview_update("NoiseReduction", {"method": method, "ksize": ksize})
+
+        def _apply() -> None:
             new_method, new_ksize = dlg.get_values()
             self.pipeline_manager.push_state(image=backup)
             self.pipeline_manager.set_step_enabled("NoiseReduction", True)
@@ -1435,19 +1549,31 @@ class MainWindow(QtWidgets.QMainWindow):
                     on_finished=self._update_committed_from_result,
                 )
             self.update_undo_redo_actions()
-        else:
+
+        def _cancel() -> None:
             if backup is not None:
                 self.preview_display.set_image(backup)
+            elif self.base_image is not None:
+                self.update_preview()
+
+        self._present_parameter_dialog(
+            "noise_reduction",
+            dlg,
+            on_accept=_apply,
+            on_cancel=_cancel,
+            on_parameters_changed=_preview,
+        )
 
     def show_sharpen_dialog(self):
         backup = None if self.committed_image is None else self.committed_image.copy()
         step = self.pipeline_manager.get_step("Sharpen")
         current_strength = float(step.params.get("strength", 1.0))
-        dlg = SharpenDialog(
-            strength=current_strength,
-            preview_callback=lambda s: self.preview_update("Sharpen", {"strength": s}),
-        )
-        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+        dlg = SharpenDialog(strength=current_strength)
+
+        def _preview(strength: float) -> None:
+            self.preview_update("Sharpen", {"strength": strength})
+
+        def _apply() -> None:
             new_strength = dlg.get_value()
             self.pipeline_manager.push_state(image=backup)
             self.pipeline_manager.set_step_enabled("Sharpen", True)
@@ -1461,19 +1587,31 @@ class MainWindow(QtWidgets.QMainWindow):
                     on_finished=self._update_committed_from_result,
                 )
             self.update_undo_redo_actions()
-        else:
+
+        def _cancel() -> None:
             if backup is not None:
                 self.preview_display.set_image(backup)
+            elif self.base_image is not None:
+                self.update_preview()
+
+        self._present_parameter_dialog(
+            "sharpen",
+            dlg,
+            on_accept=_apply,
+            on_cancel=_cancel,
+            on_parameters_changed=_preview,
+        )
 
     def show_select_channel_dialog(self):
         backup = None if self.committed_image is None else self.committed_image.copy()
         step = self.pipeline_manager.get_step("SelectChannel")
         current_channel = step.params.get("channel", "All")
-        dlg = SelectChannelDialog(
-            current_channel=current_channel,
-            preview_callback=lambda c: self.preview_update("SelectChannel", {"channel": c}),
-        )
-        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+        dlg = SelectChannelDialog(current_channel=current_channel)
+
+        def _preview(channel: str) -> None:
+            self.preview_update("SelectChannel", {"channel": channel})
+
+        def _apply() -> None:
             new_channel = dlg.get_value()
             self.pipeline_manager.push_state(image=backup)
             self.pipeline_manager.set_step_enabled("SelectChannel", True)
@@ -1487,9 +1625,20 @@ class MainWindow(QtWidgets.QMainWindow):
                     on_finished=self._update_committed_from_result,
                 )
             self.update_undo_redo_actions()
-        else:
+
+        def _cancel() -> None:
             if backup is not None:
                 self.preview_display.set_image(backup)
+            elif self.base_image is not None:
+                self.update_preview()
+
+        self._present_parameter_dialog(
+            "select_channel",
+            dlg,
+            on_accept=_apply,
+            on_cancel=_cancel,
+            on_parameters_changed=_preview,
+        )
 
     def show_crop_dialog(self):
         backup = None if self.committed_image is None else self.committed_image.copy()
@@ -1503,11 +1652,20 @@ class MainWindow(QtWidgets.QMainWindow):
             y_offset=current_y,
             width=current_width,
             height=current_height,
-            preview_callback=lambda x, y, w, h: self.preview_update(
-                "Crop", {"x_offset": x, "y_offset": y, "width": w, "height": h}
-            ),
         )
-        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+
+        def _preview(x_offset: int, y_offset: int, width: int, height: int) -> None:
+            self.preview_update(
+                "Crop",
+                {
+                    "x_offset": x_offset,
+                    "y_offset": y_offset,
+                    "width": width,
+                    "height": height,
+                },
+            )
+
+        def _apply() -> None:
             new_x, new_y, new_width, new_height = dlg.get_values()
             self.pipeline_manager.push_state(image=backup)
             self.pipeline_manager.set_step_enabled("Crop", True)
@@ -1528,9 +1686,20 @@ class MainWindow(QtWidgets.QMainWindow):
                     on_finished=self._update_committed_from_result,
                 )
             self.update_undo_redo_actions()
-        else:
+
+        def _cancel() -> None:
             if backup is not None:
                 self.preview_display.set_image(backup)
+            elif self.base_image is not None:
+                self.update_preview()
+
+        self._present_parameter_dialog(
+            "crop",
+            dlg,
+            on_accept=_apply,
+            on_cancel=_cancel,
+            on_parameters_changed=_preview,
+        )
 
     def showEvent(self, event):  # pragma: no cover - Qt virtual
         super().showEvent(event)
