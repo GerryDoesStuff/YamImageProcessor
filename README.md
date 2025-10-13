@@ -66,3 +66,9 @@ toggle before enabling telemetry so consent is always captured.
 Strings in the Qt user interface are translation-ready.  See
 [`docs/TRANSLATIONS.md`](docs/TRANSLATIONS.md) for instructions on generating and
 packaging language packs with Qt Linguist tools.
+
+## Developer documentation
+
+- [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md) – guidance for authoring
+  new processing modules, integrating with `AppCore`, and meeting logging and UI
+  accessibility conventions.
