@@ -23,6 +23,14 @@ from processing.preprocessing_pipeline import (
     PreprocessingPipeline,
     build_preprocessing_pipeline,
 )
+from ui.theme import (
+    SectionWidget,
+    ShortcutRegistry,
+    ShortcutSummaryWidget,
+    ThemedDockWidget,
+    load_icon,
+    scale_font,
+)
 
 
 class ImageDisplayWidget(QtWidgets.QLabel):
@@ -458,6 +466,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.app_core = app_core
         self.setWindowTitle("Image Pre-Processing Module")
         self.resize(1200, 700)
+        window_icon = load_icon(
+            "manage_modules",
+            fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon),
+        )
+        if not window_icon.isNull():
+            self.setWindowIcon(window_icon)
         self.original_image: Optional[np.ndarray] = None
         self.base_image: Optional[np.ndarray] = None
         self.committed_image: Optional[np.ndarray] = None
@@ -483,43 +497,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self._parameter_stream_sources: Dict[str, Any] = {}
 
         self.image_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal, self)
+        self.image_splitter.setObjectName("imageDisplaySplitter")
         self.setCentralWidget(self.image_splitter)
 
-        original_container = QtWidgets.QWidget(self.image_splitter)
-        original_layout = QtWidgets.QVBoxLayout(original_container)
-        original_layout.setContentsMargins(0, 0, 0, 0)
-        original_layout.setSpacing(6)
-        original_header = QtWidgets.QLabel("Original Image", original_container)
-        original_header.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        original_header.setObjectName("originalImageHeader")
-        original_layout.addWidget(original_header)
+        original_section = SectionWidget("Original Image", self.image_splitter)
+        original_section.setObjectName("originalImageSection")
+        original_section.setAccessibleName("Original image panel")
+        original_layout = original_section.layout
         self.original_display = ImageDisplayWidget(use_rgb_format=True)
         self.original_display.setObjectName("originalImageDisplay")
-        orig_scroll = QtWidgets.QScrollArea(original_container)
+        self.original_display.setFocusPolicy(QtCore.Qt.StrongFocus)
+        orig_scroll = QtWidgets.QScrollArea(original_section)
         orig_scroll.setWidgetResizable(True)
         orig_scroll.setWidget(self.original_display)
         orig_scroll.setObjectName("originalImageScrollArea")
-        original_layout.addWidget(orig_scroll)
+        orig_scroll.setFocusPolicy(QtCore.Qt.StrongFocus)
+        original_layout.addWidget(orig_scroll, 1)
 
-        preview_container = QtWidgets.QWidget(self.image_splitter)
-        preview_layout = QtWidgets.QVBoxLayout(preview_container)
-        preview_layout.setContentsMargins(0, 0, 0, 0)
-        preview_layout.setSpacing(6)
-        preview_header = QtWidgets.QLabel("Pre-Processing Preview", preview_container)
-        preview_header.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        preview_header.setObjectName("previewImageHeader")
-        preview_layout.addWidget(preview_header)
+        preview_section = SectionWidget("Pre-Processing Preview", self.image_splitter)
+        preview_section.setObjectName("previewImageSection")
+        preview_section.setAccessibleName("Pre-processing preview panel")
+        preview_layout = preview_section.layout
         self.preview_display = ImageDisplayWidget(use_rgb_format=False)
         self.preview_display.setObjectName("previewImageDisplay")
-        prev_scroll = QtWidgets.QScrollArea(preview_container)
+        self.preview_display.setFocusPolicy(QtCore.Qt.StrongFocus)
+        prev_scroll = QtWidgets.QScrollArea(preview_section)
         prev_scroll.setWidgetResizable(True)
         prev_scroll.setWidget(self.preview_display)
         prev_scroll.setObjectName("previewImageScrollArea")
-        preview_layout.addWidget(prev_scroll)
+        prev_scroll.setFocusPolicy(QtCore.Qt.StrongFocus)
+        preview_layout.addWidget(prev_scroll, 1)
 
-        self.image_splitter.addWidget(original_container)
-        self.image_splitter.addWidget(preview_container)
-        self.image_splitter.setObjectName("imageDisplaySplitter")
+        self.image_splitter.addWidget(original_section)
+        self.image_splitter.addWidget(preview_section)
         self.image_splitter.setChildrenCollapsible(False)
         self.image_splitter.setStretchFactor(0, 1)
         self.image_splitter.setStretchFactor(1, 1)
@@ -542,10 +552,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_module_context_menu
         )
 
-        pipeline_widget = QtWidgets.QWidget()
-        pipeline_layout = QtWidgets.QVBoxLayout(pipeline_widget)
-        pipeline_layout.setContentsMargins(6, 6, 6, 6)
-        pipeline_layout.setSpacing(6)
+        pipeline_widget = SectionWidget("Pipeline Summary")
+        pipeline_widget.setObjectName("pipelineSummarySection")
+        pipeline_layout = pipeline_widget.layout
         self.pipeline_label = QtWidgets.QLabel("Current Pipeline: (none)")
         self.pipeline_label.setObjectName("pipelineSummaryLabel")
         self.pipeline_label.setWordWrap(True)
@@ -553,17 +562,13 @@ class MainWindow(QtWidgets.QMainWindow):
             "Text summary of the current preprocessing pipeline order."
         )
         pipeline_layout.addWidget(self.pipeline_label)
-        pipeline_layout.addWidget(self.pipeline_overview_list)
+        pipeline_layout.addWidget(self.pipeline_overview_list, 1)
 
-        self.pipeline_dock = QtWidgets.QDockWidget("Pipeline Overview", self)
+        self.pipeline_dock = ThemedDockWidget("Pipeline Overview", self)
         self.pipeline_dock.setObjectName("pipelineOverviewDock")
         self.pipeline_dock.setWidget(pipeline_widget)
         self.pipeline_dock.setAllowedAreas(
             QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea
-        )
-        self.pipeline_dock.setFeatures(
-            QtWidgets.QDockWidget.DockWidgetMovable
-            | QtWidgets.QDockWidget.DockWidgetFloatable
         )
         self.pipeline_dock.setToolTip("Pipeline overview panel (Ctrl+1)")
         self.pipeline_dock.setWhatsThis(
@@ -587,23 +592,20 @@ class MainWindow(QtWidgets.QMainWindow):
             "Displays diagnostic messages and progress updates emitted during preprocessing."
         )
 
-        diagnostics_widget = QtWidgets.QWidget()
-        diagnostics_layout = QtWidgets.QVBoxLayout(diagnostics_widget)
-        diagnostics_layout.setContentsMargins(6, 6, 6, 6)
-        diagnostics_layout.setSpacing(6)
-        diagnostics_layout.addWidget(self.diagnostics_log)
+        diagnostics_widget = SectionWidget("Diagnostics & Shortcuts")
+        diagnostics_widget.setObjectName("diagnosticsSection")
+        diagnostics_layout = diagnostics_widget.layout
+        self.shortcut_summary = ShortcutSummaryWidget()
+        diagnostics_layout.addWidget(self.shortcut_summary)
+        diagnostics_layout.addWidget(self.diagnostics_log, 1)
 
-        self.diagnostics_dock = QtWidgets.QDockWidget("Diagnostics Log", self)
+        self.diagnostics_dock = ThemedDockWidget("Diagnostics Log", self)
         self.diagnostics_dock.setObjectName("diagnosticsLogDock")
         self.diagnostics_dock.setWidget(diagnostics_widget)
         self.diagnostics_dock.setAllowedAreas(
             QtCore.Qt.BottomDockWidgetArea
             | QtCore.Qt.LeftDockWidgetArea
             | QtCore.Qt.RightDockWidgetArea
-        )
-        self.diagnostics_dock.setFeatures(
-            QtWidgets.QDockWidget.DockWidgetMovable
-            | QtWidgets.QDockWidget.DockWidgetFloatable
         )
         self.diagnostics_dock.setToolTip("Diagnostics log panel (Ctrl+2)")
         self.diagnostics_dock.setWhatsThis(
@@ -623,29 +625,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.module_controls_container.setWhatsThis(
             "Holds parameter controls for the selected preprocessing module."
         )
-        module_controls_content = QtWidgets.QWidget()
-        self.module_controls_layout = QtWidgets.QVBoxLayout(module_controls_content)
-        self.module_controls_layout.setContentsMargins(6, 6, 6, 6)
-        self.module_controls_layout.setSpacing(6)
+        module_controls_content = SectionWidget("Module Parameters")
+        module_controls_content.setObjectName("moduleControlsSection")
+        self.module_controls_layout = module_controls_content.layout
         self.module_controls_placeholder = QtWidgets.QLabel(
             "Select a module to configure its parameters."
         )
         self.module_controls_placeholder.setWordWrap(True)
+        self.module_controls_placeholder.setFont(
+            scale_font(self.font(), factor=1.0)
+        )
         self.module_controls_layout.addWidget(self.module_controls_placeholder)
         self.module_controls_layout.addStretch(1)
         self.module_controls_container.setWidget(module_controls_content)
 
-        self.module_controls_dock = QtWidgets.QDockWidget(
+        self.module_controls_dock = ThemedDockWidget(
             "Module Parameters", self
         )
         self.module_controls_dock.setObjectName("moduleParametersDock")
         self.module_controls_dock.setWidget(self.module_controls_container)
         self.module_controls_dock.setAllowedAreas(
             QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea
-        )
-        self.module_controls_dock.setFeatures(
-            QtWidgets.QDockWidget.DockWidgetMovable
-            | QtWidgets.QDockWidget.DockWidgetFloatable
         )
         self.module_controls_dock.setToolTip("Module parameter controls (Ctrl+3)")
         self.module_controls_dock.setWhatsThis(
@@ -655,6 +655,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.module_controls_dock)
         self.module_controls_dock.visibilityChanged.connect(
             self._on_module_controls_dock_visibility_changed
+        )
+
+        self.shortcut_status_label = QtWidgets.QLabel()
+        self.shortcut_status_label.setObjectName("shortcutStatusLabel")
+        self.shortcut_status_label.setAccessibleName(
+            "Primary keyboard shortcuts summary"
+        )
+        self.statusBar().addPermanentWidget(self.shortcut_status_label, 1)
+        self.shortcut_registry = ShortcutRegistry(
+            summary_widget=self.shortcut_summary,
+            status_label=self.shortcut_status_label,
+            parent=self,
         )
 
         self._module_action_lookup: Dict[
@@ -697,6 +709,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_shortcut.activated.connect(self.undo)
         self.redo_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Y"), self)
         self.redo_shortcut.activated.connect(self.redo)
+        self._register_static_shortcuts()
 
         self.pipeline = build_preprocessing_pipeline(self.app_core, self.pipeline_manager)
         self.update_pipeline_label()
@@ -824,6 +837,9 @@ class MainWindow(QtWidgets.QMainWindow):
         menubar = self.menuBar()
         menubar.clear()
 
+        if hasattr(self, "shortcut_registry"):
+            self.shortcut_registry.reset()
+
         menu_cache: Dict[Tuple[str, ...], QtWidgets.QMenu] = {}
         self._module_action_lookup.clear()
 
@@ -842,15 +858,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
         file_menu = ensure_menu(("File",))
 
-        self.load_image_action = QtWidgets.QAction("&Load Image…", self)
+        self.load_image_action = QtWidgets.QAction("&Load Image...", self)
         self.load_image_action.setShortcut(QtGui.QKeySequence.Open)
         self.load_image_action.setShortcutVisibleInContextMenu(True)
         self.load_image_action.setStatusTip("Load an image for preprocessing")
         self.load_image_action.triggered.connect(self.load_image)
+        self.load_image_action.setIcon(
+            load_icon(
+                "open_project",
+                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton),
+            )
+        )
         file_menu.addAction(self.load_image_action)
+        self.shortcut_registry.register_action("Load image", self.load_image_action)
 
         self.save_processed_image_action = QtWidgets.QAction(
-            "&Save Pre-Processed Image…", self
+            "&Save Pre-Processed Image...", self
         )
         self.save_processed_image_action.setShortcut(QtGui.QKeySequence.Save)
         self.save_processed_image_action.setShortcutVisibleInContextMenu(True)
@@ -860,12 +883,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_processed_image_action.triggered.connect(
             self.save_processed_image
         )
+        self.save_processed_image_action.setIcon(
+            load_icon(
+                "save_project",
+                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton),
+            )
+        )
         file_menu.addAction(self.save_processed_image_action)
+        self.shortcut_registry.register_action(
+            "Save pre-processed image", self.save_processed_image_action
+        )
 
         file_menu.addSeparator()
 
         self.mass_preprocess_action = QtWidgets.QAction(
-            "Mass Pre-Process &Folder…", self
+            "Mass Pre-Process &Folder...", self
         )
         self.mass_preprocess_action.setShortcut("Ctrl+Shift+M")
         self.mass_preprocess_action.setShortcutVisibleInContextMenu(True)
@@ -873,12 +905,21 @@ class MainWindow(QtWidgets.QMainWindow):
             "Apply the active pipeline to every image in a folder"
         )
         self.mass_preprocess_action.triggered.connect(self.mass_preprocess)
+        self.mass_preprocess_action.setIcon(
+            load_icon(
+                "manage_modules",
+                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView),
+            )
+        )
         file_menu.addAction(self.mass_preprocess_action)
+        self.shortcut_registry.register_action(
+            "Mass pre-process folder", self.mass_preprocess_action
+        )
 
         file_menu.addSeparator()
 
         self.import_pipeline_action = QtWidgets.QAction(
-            "&Import Pipeline Settings…", self
+            "&Import Pipeline Settings...", self
         )
         self.import_pipeline_action.setShortcut("Ctrl+I")
         self.import_pipeline_action.setShortcutVisibleInContextMenu(True)
@@ -886,10 +927,19 @@ class MainWindow(QtWidgets.QMainWindow):
             "Load preprocessing pipeline settings from disk"
         )
         self.import_pipeline_action.triggered.connect(self.import_pipeline)
+        self.import_pipeline_action.setIcon(
+            load_icon(
+                "open_project",
+                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton),
+            )
+        )
         file_menu.addAction(self.import_pipeline_action)
+        self.shortcut_registry.register_action(
+            "Import pipeline settings", self.import_pipeline_action
+        )
 
         self.export_pipeline_action = QtWidgets.QAction(
-            "E&xport Pipeline Settings…", self
+            "E&xport Pipeline Settings...", self
         )
         self.export_pipeline_action.setShortcut("Ctrl+Shift+E")
         self.export_pipeline_action.setShortcutVisibleInContextMenu(True)
@@ -897,7 +947,16 @@ class MainWindow(QtWidgets.QMainWindow):
             "Save preprocessing pipeline settings to disk"
         )
         self.export_pipeline_action.triggered.connect(self.export_pipeline)
+        self.export_pipeline_action.setIcon(
+            load_icon(
+                "save_project_as",
+                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton),
+            )
+        )
         file_menu.addAction(self.export_pipeline_action)
+        self.shortcut_registry.register_action(
+            "Export pipeline settings", self.export_pipeline_action
+        )
 
         edit_menu = ensure_menu(("Edit",))
         self.undo_action = QtWidgets.QAction("&Undo", self)
@@ -905,14 +964,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_action.setShortcutVisibleInContextMenu(True)
         self.undo_action.triggered.connect(self.undo)
         self.undo_action.setEnabled(False)
+        self.undo_action.setIcon(
+            load_icon(
+                "undo",
+                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_ArrowBack),
+            )
+        )
         edit_menu.addAction(self.undo_action)
+        self.shortcut_registry.register_action("Undo", self.undo_action)
 
         self.redo_action = QtWidgets.QAction("&Redo", self)
         self.redo_action.setShortcut(QtGui.QKeySequence.Redo)
         self.redo_action.setShortcutVisibleInContextMenu(True)
         self.redo_action.triggered.connect(self.redo)
         self.redo_action.setEnabled(False)
+        self.redo_action.setIcon(
+            load_icon(
+                "redo",
+                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_ArrowForward),
+            )
+        )
         edit_menu.addAction(self.redo_action)
+        self.shortcut_registry.register_action("Redo", self.redo_action)
 
         edit_menu.addSeparator()
 
@@ -923,7 +996,16 @@ class MainWindow(QtWidgets.QMainWindow):
             "Restore the preprocessing pipeline to default settings"
         )
         self.reset_pipeline_action.triggered.connect(self.reset_all)
+        self.reset_pipeline_action.setIcon(
+            load_icon(
+                "redo",
+                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload),
+            )
+        )
         edit_menu.addAction(self.reset_pipeline_action)
+        self.shortcut_registry.register_action(
+            "Reset pipeline", self.reset_pipeline_action
+        )
 
         view_menu = ensure_menu(("View",))
 
@@ -939,7 +1021,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_pipeline_dock_action.toggled.connect(
             self.pipeline_dock.setVisible
         )
+        self.show_pipeline_dock_action.setIcon(
+            load_icon(
+                "manage_modules",
+                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogListView),
+            )
+        )
         view_menu.addAction(self.show_pipeline_dock_action)
+        self.shortcut_registry.register_action(
+            "Toggle pipeline overview", self.show_pipeline_dock_action
+        )
 
         self.show_diagnostics_dock_action = QtWidgets.QAction(
             "Diagnostics Log", self
@@ -955,7 +1046,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_diagnostics_dock_action.toggled.connect(
             self.diagnostics_dock.setVisible
         )
+        self.show_diagnostics_dock_action.setIcon(
+            load_icon(
+                "documentation",
+                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView),
+            )
+        )
         view_menu.addAction(self.show_diagnostics_dock_action)
+        self.shortcut_registry.register_action(
+            "Toggle diagnostics log", self.show_diagnostics_dock_action
+        )
 
         self.show_module_controls_dock_action = QtWidgets.QAction(
             "Module Controls", self
@@ -971,7 +1071,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_module_controls_dock_action.toggled.connect(
             self.module_controls_dock.setVisible
         )
+        self.show_module_controls_dock_action.setIcon(
+            load_icon(
+                "manage_modules",
+                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView),
+            )
+        )
         view_menu.addAction(self.show_module_controls_dock_action)
+        self.shortcut_registry.register_action(
+            "Toggle module controls", self.show_module_controls_dock_action
+        )
 
         view_menu.addSeparator()
 
@@ -1014,6 +1123,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 menu.addAction(action)
                 key = (module.metadata.identifier, entry.text, entry.path)
                 self._module_action_lookup[key] = action
+                self.shortcut_registry.register_action(entry.text, action)
 
         help_menu = ensure_menu(("Help",))
 
@@ -1027,7 +1137,16 @@ class MainWindow(QtWidgets.QMainWindow):
             "Open the user documentation for Yam Image Processor"
         )
         self.view_documentation_action.triggered.connect(self.show_documentation)
+        self.view_documentation_action.setIcon(
+            load_icon(
+                "documentation",
+                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DialogHelpButton),
+            )
+        )
         help_menu.addAction(self.view_documentation_action)
+        self.shortcut_registry.register_action(
+            "View documentation", self.view_documentation_action
+        )
 
         self.about_action = QtWidgets.QAction("&About", self)
         self.about_action.setStatusTip("Show application information")
@@ -1038,9 +1157,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Yam Image Processor Pre-Processing module",
             )
         )
+        self.about_action.setIcon(
+            load_icon(
+                "about",
+                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView),
+            )
+        )
         help_menu.addAction(self.about_action)
+        self.shortcut_registry.register_action("About", self.about_action)
 
         self.update_undo_redo_actions()
+        self._register_static_shortcuts()
+
+    def _register_static_shortcuts(self) -> None:
+        if not hasattr(self, "shortcut_registry"):
+            return
+        mapping = (
+            ("Focus pipeline overview", "_pipeline_focus_shortcut"),
+            ("Focus diagnostics log", "_diagnostics_focus_shortcut"),
+            ("Focus module controls", "_module_controls_focus_shortcut"),
+            ("Undo", "undo_shortcut"),
+            ("Redo", "redo_shortcut"),
+        )
+        for label, attr in mapping:
+            shortcut = getattr(self, attr, None)
+            if shortcut is not None:
+                self.shortcut_registry.register_shortcut(label, shortcut)
 
     def _activate_module(self, module: ModuleBase) -> None:
         try:
