@@ -7,7 +7,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -23,6 +23,24 @@ from processing.extraction_pipeline import (
     build_extraction_pipeline_from_dict,
     get_extraction_settings_snapshot,
 )
+
+
+def _build_extraction_pipeline_metadata(settings: Mapping[str, Any]) -> Dict[str, Any]:
+    order_value = settings.get("extraction/order", "")
+    order_list = [entry for entry in order_value.split(",") if entry]
+    enabled_steps = [
+        key[len("extraction/") : -len("/enabled")]
+        for key, value in settings.items()
+        if key.startswith("extraction/")
+        and key.endswith("/enabled")
+        and parse_bool(value)
+    ]
+    return {
+        "stage": "extraction",
+        "order": order_list,
+        "enabled": enabled_steps,
+    }
+
 
 try:
     import pyperclip
@@ -409,6 +427,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_preview: Optional[np.ndarray] = None
         self.undo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.redo_stack: List[Tuple[np.ndarray, List[str]]] = []
+        self.current_image_path: Optional[str] = None
         self.settings_manager = self.app_core.settings
         self.settings = self.settings_manager.backend
         # Set default extraction settings if not present
@@ -849,13 +868,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.preview_display.set_image(backup)
 
     def load_image(self):
-        filename, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Load Image", "", "Images (*.png *.jpg *.bmp *.tiff)")
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Load Image", "", "Images (*.png *.jpg *.bmp *.tiff *.npy)")
         if filename:
             try:
                 self.original_image = Loader.load_image(filename)
                 self.base_image = self.original_image.copy()
                 self.committed_image = build_extraction_pipeline(self.app_core).apply(self.base_image)
                 self.current_preview = self.committed_image.copy()
+                self.current_image_path = filename
                 self.original_display.set_image(self.original_image)
                 self.preview_display.set_image(self.current_preview)
                 self.undo_stack.clear()
@@ -889,11 +909,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.current_preview is None:
             QtWidgets.QMessageBox.warning(self, "Warning", "No extracted image to save.")
             return
-        filename, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Extracted Image", "", "Bitmap Files (*.bmp)")
+        filename, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Extracted Image", "", "Image Files (*.bmp *.png *.jpg *.tiff *.npy)")
         if filename:
             try:
-                cv2.imwrite(filename, self.current_preview)
-                QtWidgets.QMessageBox.information(self, "Save Image", f"Image saved successfully to {filename}")
+                pipeline_settings = get_extraction_settings_snapshot(self.settings_manager)
+                pipeline_metadata = _build_extraction_pipeline_metadata(pipeline_settings)
+                metadata: Dict[str, Any] = {
+                    "stage": "extraction",
+                    "mode": "single",
+                }
+                if self.current_image_path:
+                    metadata["source"] = {"input": self.current_image_path}
+                result = self.app_core.io_manager.save_image(
+                    filename,
+                    self.current_preview,
+                    metadata=metadata,
+                    pipeline=pipeline_metadata,
+                    settings_snapshot=pipeline_settings,
+                )
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Save Image",
+                    f"Image saved successfully to {result.image_path}",
+                )
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
 
@@ -905,6 +943,9 @@ class MainWindow(QtWidgets.QMainWindow):
         base_folder = os.path.basename(folder)
         output_folder = os.path.join(parent_dir, base_folder + "_feat")
         os.makedirs(output_folder, exist_ok=True)
+        pipeline_settings = get_extraction_settings_snapshot(self.settings_manager)
+        pipeline_metadata = _build_extraction_pipeline_metadata(pipeline_settings)
+        io_manager = self.app_core.io_manager
         count = 0
         for file in os.listdir(folder):
             fullpath = os.path.join(folder, file)
@@ -914,7 +955,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     processed = self.pipeline.apply(image)
                     name, ext = os.path.splitext(file)
                     image_outpath = os.path.join(output_folder, name + "_feat" + ext)
-                    cv2.imwrite(image_outpath, processed)
+                    io_manager.save_image(
+                        image_outpath,
+                        processed,
+                        metadata={
+                            "stage": "extraction",
+                            "mode": "batch",
+                            "source": {"input": fullpath},
+                        },
+                        pipeline=pipeline_metadata,
+                        settings_snapshot=pipeline_settings,
+                    )
                     self.export_all_extraction_data(processed, name, output_folder)
                     count += 1
                 except Exception as e:

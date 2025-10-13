@@ -14,7 +14,7 @@ from skimage import io
 class Config:
     """Application configuration constants."""
 
-    SUPPORTED_FORMATS = [".jpg", ".png", ".tiff", ".bmp"]
+    SUPPORTED_FORMATS = [".jpg", ".png", ".tiff", ".bmp", ".npy"]
     OUTPUT_DIR = "output"
     SETTINGS_ORG = "MicroscopicApp"
     SETTINGS_APP = "ImageProcessor"
@@ -26,8 +26,11 @@ class Loader:
     @staticmethod
     def load_image(path: str) -> np.ndarray:
         _, ext = os.path.splitext(path)
-        if ext.lower() not in Config.SUPPORTED_FORMATS:
+        ext = ext.lower()
+        if ext not in Config.SUPPORTED_FORMATS:
             raise ValueError(f"Unsupported file format: {ext}")
+        if ext == ".npy":
+            return np.load(path, allow_pickle=False)
         try:
             image = io.imread(path)  # loaded as RGB
         except Exception as exc:  # pragma: no cover - passthrough logging

@@ -461,6 +461,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.base_image: Optional[np.ndarray] = None
         self.committed_image: Optional[np.ndarray] = None
         self.current_preview: Optional[np.ndarray] = None
+        self.current_image_path: Optional[str] = None
         self.pipeline_manager: PipelineManager = (
             self.app_core.get_preprocessing_pipeline_manager()
         )
@@ -1242,6 +1243,9 @@ class MainWindow(QtWidgets.QMainWindow):
         pipeline_snapshot = build_preprocessing_pipeline(
             self.app_core, self.pipeline_manager.clone()
         )
+        pipeline_metadata = {"stage": "preprocessing", **pipeline_snapshot.to_dict()}
+        settings_snapshot = self.app_core.settings.snapshot(prefix="preprocess/")
+        io_manager = self.app_core.io_manager
 
         def _task(cancel_event: threading.Event, progress: Callable[[int], None]) -> int:
             processed_count = 0
@@ -1256,7 +1260,21 @@ class MainWindow(QtWidgets.QMainWindow):
                     name, ext = os.path.splitext(filename)
                     new_filename = name + "_pp" + ext
                     outpath = os.path.join(output_folder, new_filename)
-                    cv2.imwrite(outpath, result)
+                    io_manager.save_image(
+                        outpath,
+                        result,
+                        metadata={
+                            "stage": "preprocessing",
+                            "mode": "batch",
+                            "source": {
+                                "input": path,
+                                "index": index,
+                                "total": total,
+                            },
+                        },
+                        pipeline=pipeline_metadata,
+                        settings_snapshot=settings_snapshot,
+                    )
                     processed_count += 1
                 except Exception as exc:  # pragma: no cover - user feedback
                     logging.error("Failed to process %s: %s", filename, exc)
@@ -1335,7 +1353,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def load_image(self):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Load Image", "", "Image Files (*.jpg *.png *.tiff *.bmp)"
+            self, "Load Image", "", "Image Files (*.jpg *.png *.tiff *.bmp *.npy)"
         )
         if not filename:
             return
@@ -1348,6 +1366,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.original_image = image.copy()
         self.base_image = image.copy()
         self.committed_image = image.copy()
+        self.current_image_path = filename
         self.pipeline = build_preprocessing_pipeline(self.app_core, self.pipeline_manager)
         self.original_display.set_image(self.original_image)
         self.preview_display.set_image(self.base_image)
@@ -1365,11 +1384,26 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "No Image", "No processed image to save.")
             return
         filename, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save Pre-Processed Image", "", "Image Files (*.jpg *.png *.tiff *.bmp)"
+            self, "Save Pre-Processed Image", "", "Image Files (*.jpg *.png *.tiff *.bmp *.npy)"
         )
         if filename:
-            cv2.imwrite(filename, self.committed_image)
-            self.statusBar().showMessage(f"Saved processed image to: {filename}")
+            io_manager = self.app_core.io_manager
+            pipeline_metadata = {"stage": "preprocessing", **self.pipeline_manager.to_dict()}
+            settings_snapshot = self.app_core.settings.snapshot(prefix="preprocess/")
+            metadata: Dict[str, Any] = {
+                "stage": "preprocessing",
+                "mode": "single",
+            }
+            if self.current_image_path:
+                metadata["source"] = {"input": self.current_image_path}
+            result = io_manager.save_image(
+                filename,
+                self.committed_image,
+                metadata=metadata,
+                pipeline=pipeline_metadata,
+                settings_snapshot=settings_snapshot,
+            )
+            self.statusBar().showMessage(f"Saved processed image to: {result.image_path}")
 
     def update_preview(self):
         if self.base_image is not None:

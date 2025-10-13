@@ -7,13 +7,14 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import cv2
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from core.app_core import AppCore
+from core.io_manager import IOManager
 from core.segmentation import Config, Loader, Preprocessor, parse_bool
 from processing.segmentation_pipeline import (
     PipelineStep,
@@ -22,6 +23,24 @@ from processing.segmentation_pipeline import (
     build_segmentation_pipeline_from_dict,
     get_settings_snapshot,
 )
+
+
+def _build_segmentation_pipeline_metadata(settings: Mapping[str, Any]) -> Dict[str, Any]:
+    order_value = settings.get("segmentation/order", "")
+    order_list = [entry for entry in order_value.split(",") if entry]
+    enabled_steps = [
+        key[len("segmentation/") : -len("/enabled")]
+        for key, value in settings.items()
+        if key.startswith("segmentation/")
+        and key.endswith("/enabled")
+        and parse_bool(value)
+    ]
+    return {
+        "stage": "segmentation",
+        "order": order_list,
+        "enabled": enabled_steps,
+    }
+
 
 #####################################
 # 4. PIPELINE ORDER MANAGER
@@ -822,7 +841,13 @@ class BorderRemovalDialog(QtWidgets.QDialog):
 # 8. MASS PROCESS FUNCTION (TOP-LEVEL)
 #####################################
 # This function is defined at module level for pickling.
-def process_segmentation_file(file: str, folder: str, pipeline_settings: dict) -> Tuple[str, bool, str]:
+def process_segmentation_file(
+    file: str,
+    folder: str,
+    pipeline_settings: dict,
+    pipeline_metadata: Mapping[str, Any],
+    io_preferences: Mapping[str, Any],
+) -> Tuple[str, bool, str]:
     fullpath = os.path.join(folder, file)
     try:
         image = Loader.load_image(fullpath)
@@ -833,7 +858,18 @@ def process_segmentation_file(file: str, folder: str, pipeline_settings: dict) -
         name, ext = os.path.splitext(file)
         new_filename = name + "_seg" + ext
         outpath = os.path.join(output_folder, new_filename)
-        cv2.imwrite(outpath, processed)
+        io_manager = IOManager(io_preferences)
+        io_manager.save_image(
+            outpath,
+            processed,
+            metadata={
+                "stage": "segmentation",
+                "mode": "batch",
+                "source": {"input": fullpath},
+            },
+            pipeline=pipeline_metadata,
+            settings_snapshot=pipeline_settings,
+        )
         return (file, True, "")
     except Exception as e:
         logging.error(f"Error processing {file}: {e}")
@@ -856,6 +892,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.redo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.current_preview: Optional[np.ndarray] = None
+        self.current_image_path: Optional[str] = None
         self.settings_manager = self.app_core.settings
         self.settings = self.settings_manager.backend
         # Set default segmentation parameters if missing.
@@ -1562,13 +1599,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.preview_display.set_image(backup)
 
     def load_image(self):
-        filename, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Load Image", "", "Images (*.png *.jpg *.bmp *.tiff)")
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Load Image", "", "Images (*.png *.jpg *.bmp *.tiff *.npy)")
         if filename:
             try:
                 self.original_image = Loader.load_image(filename)
                 self.base_image = self.original_image.copy()
                 self.committed_image = build_segmentation_pipeline(self.app_core).apply(self.base_image)
                 self.current_preview = self.committed_image.copy()
+                self.current_image_path = filename
                 self.original_display.set_image(self.original_image)
                 self.preview_display.set_image(self.current_preview)
                 self.undo_stack.clear()
@@ -1600,11 +1638,30 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.current_preview is None:
             QtWidgets.QMessageBox.warning(self, "Warning", "No segmented image to save.")
             return
-        filename, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Segmented Image", "", "Bitmap Files (*.bmp)")
+        filename, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Segmented Image", "", "Image Files (*.bmp *.png *.jpg *.tiff *.npy)")
         if filename:
             try:
-                cv2.imwrite(filename, self.current_preview)
-                QtWidgets.QMessageBox.information(self, "Save Image", f"Image saved successfully to {filename}")
+                io_manager = self.app_core.io_manager
+                pipeline_settings = get_settings_snapshot(self.settings_manager)
+                pipeline_metadata = _build_segmentation_pipeline_metadata(pipeline_settings)
+                metadata: Dict[str, Any] = {
+                    "stage": "segmentation",
+                    "mode": "single",
+                }
+                if self.current_image_path:
+                    metadata["source"] = {"input": self.current_image_path}
+                result = io_manager.save_image(
+                    filename,
+                    self.current_preview,
+                    metadata=metadata,
+                    pipeline=pipeline_metadata,
+                    settings_snapshot=pipeline_settings,
+                )
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Save Image",
+                    f"Image saved successfully to {result.image_path}",
+                )
             except Exception as e:
                 logging.exception("Error saving image.")
                 QtWidgets.QMessageBox.critical(self, "Error", f"Failed to save image:\n{e}")
@@ -1622,10 +1679,22 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         # Capture pipeline settings into a dictionary for processing.
         pipeline_settings = get_settings_snapshot(self.settings_manager)
+        pipeline_metadata = _build_segmentation_pipeline_metadata(pipeline_settings)
+        io_preferences = self.app_core.io_manager.export_preferences()
         processed_count = 0
         errors = []
         with concurrent.futures.ProcessPoolExecutor() as executor:
-            futures = {executor.submit(process_segmentation_file, f, folder, pipeline_settings): f for f in files}
+            futures = {
+                executor.submit(
+                    process_segmentation_file,
+                    f,
+                    folder,
+                    pipeline_settings,
+                    pipeline_metadata,
+                    io_preferences,
+                ): f
+                for f in files
+            }
             for future in concurrent.futures.as_completed(futures):
                 file, success, err = future.result()
                 if success:
