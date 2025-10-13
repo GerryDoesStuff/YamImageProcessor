@@ -24,6 +24,15 @@ stage, expose a `metadata` property that returns a
 UI integration is required. Module metadata is displayed throughout the UI and
 is used when serialising pipelines, so keep the values descriptive and stable.
 
+### Performance roadmap
+
+Developers planning GPU-accelerated features should consult the
+[`docs/performance_roadmap.md`](performance_roadmap.md) document. It outlines the
+target backends, the expected usage of `ModuleCapabilities.requires_gpu` and
+`PipelineStep.execution.requires_gpu`, and how OpenCV or scikit-image kernels
+will be wired into the pipeline manager. Aligning new modules with the roadmap
+ensures upcoming executors can adopt them without refactoring.
+
 ### Example skeleton
 
 ```python
