@@ -14,6 +14,7 @@ from plugins.module_base import ModuleBase, ModuleStage
 from .thread_controller import ThreadController
 
 from .io_manager import IOManager
+from .persistence import AutosaveManager
 from .settings import SettingsManager
 
 from .logging import init_logging
@@ -33,6 +34,10 @@ class AppConfiguration:
     plugin_packages: Sequence[str] = field(default_factory=lambda: ["modules"])
     module_paths: Sequence[Path | str] = field(default_factory=list)
     max_workers: Optional[int] = None
+    autosave_directory: Optional[Path] = None
+    autosave_interval_seconds: float = 120.0
+    autosave_backup_retention: int = 5
+    autosave_enabled_default: bool = True
 
 
 class AppCore:
@@ -45,6 +50,7 @@ class AppCore:
         self.settings_manager: Optional[SettingsManager] = None
         self.thread_controller: Optional[ThreadController] = None
         self._io_manager: Optional[IOManager] = None
+        self.autosave_manager: Optional[AutosaveManager] = None
         self._module_catalog: Dict[ModuleStage, Dict[str, ModuleBase]] = {
             stage: {} for stage in ModuleStage
         }
@@ -85,6 +91,10 @@ class AppCore:
             self.thread_controller.shutdown()
             self.thread_controller = None
 
+        if self.autosave_manager is not None:
+            self.autosave_manager.shutdown()
+            self.autosave_manager = None
+
         self.logger.info("Application core shutdown", extra={"component": "AppCore"})
         self._bootstrapped = False
 
@@ -113,6 +123,14 @@ class AppCore:
         if self._io_manager is None:
             raise RuntimeError("IO manager not initialised. Call bootstrap() first.")
         return self._io_manager
+
+    @property
+    def autosave(self) -> AutosaveManager:
+        """Return the configured autosave manager."""
+
+        if self.autosave_manager is None:
+            raise RuntimeError("Autosave manager not initialised. Call bootstrap() first.")
+        return self.autosave_manager
 
     def ensure_bootstrapped(self) -> None:
         """Ensure :meth:`bootstrap` has been executed."""
@@ -171,9 +189,18 @@ class AppCore:
         )
 
     def _init_settings(self) -> None:
+        defaults: Dict[str, Any] = {
+            "autosave/interval_seconds": self.config.autosave_interval_seconds,
+            "autosave/backup_retention": self.config.autosave_backup_retention,
+            "autosave/enabled": self.config.autosave_enabled_default,
+        }
+        if self.config.autosave_directory is not None:
+            defaults["autosave/workspace"] = str(self.config.autosave_directory)
+
         self.settings_manager = SettingsManager(
             self.config.organization,
             self.config.application,
+            defaults=defaults,
         )
         stored_diagnostics = self.settings_manager.get(
             "diagnostics/enabled", self.config.diagnostics_enabled
@@ -182,6 +209,7 @@ class AppCore:
             self._coerce_bool(stored_diagnostics), persist=False
         )
         self._io_manager = IOManager(self.settings_manager)
+        self._init_autosave()
         self.logger.debug(
             "Settings manager initialised",
             extra={"component": "AppCore"},
@@ -192,6 +220,32 @@ class AppCore:
         self.logger.debug(
             "Thread controller initialised",
             extra={"component": "AppCore"},
+        )
+
+    def _init_autosave(self) -> None:
+        if self.settings_manager is None or self._io_manager is None:
+            raise RuntimeError("Settings manager and IO manager must be initialised first")
+
+        workspace = self.settings_manager.autosave_workspace()
+        if workspace is None:
+            workspace = (
+                self.config.autosave_directory
+                if self.config.autosave_directory is not None
+                else Path.home() / f".{self.config.application.lower()}" / "autosave"
+            )
+            self.settings_manager.set_autosave_workspace(workspace)
+
+        autosave_logger = logging.getLogger(f"{__name__}.Autosave")
+        self.autosave_manager = AutosaveManager(
+            self.settings_manager,
+            self._io_manager,
+            autosave_directory=workspace,
+            interval_seconds=self.settings_manager.autosave_interval(),
+            logger=autosave_logger,
+        )
+        self.logger.debug(
+            "Autosave manager initialised",
+            extra={"component": "AppCore", "autosave_dir": str(workspace)},
         )
 
     def _discover_plugins(self) -> None:

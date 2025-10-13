@@ -33,4 +33,5 @@ if __name__ == "__main__":
     )
     app_core.ensure_bootstrapped()
     _ = app_core.settings
+    _ = app_core.autosave
     sys.exit(main(app_core))
