@@ -413,34 +413,194 @@ class MainWindow(QtWidgets.QMainWindow):
         self._progress_dialog: Optional[QtWidgets.QProgressDialog] = None
         self._register_thread_signals()
 
-        central_widget = QtWidgets.QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QtWidgets.QVBoxLayout(central_widget)
+        self.image_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal, self)
+        self.setCentralWidget(self.image_splitter)
 
-        images_layout = QtWidgets.QHBoxLayout()
-        original_group = QtWidgets.QGroupBox("Original Image")
-        orig_layout = QtWidgets.QVBoxLayout()
+        original_container = QtWidgets.QWidget(self.image_splitter)
+        original_layout = QtWidgets.QVBoxLayout(original_container)
+        original_layout.setContentsMargins(0, 0, 0, 0)
+        original_layout.setSpacing(6)
+        original_header = QtWidgets.QLabel("Original Image", original_container)
+        original_header.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        original_header.setObjectName("originalImageHeader")
+        original_layout.addWidget(original_header)
         self.original_display = ImageDisplayWidget(use_rgb_format=True)
-        orig_scroll = QtWidgets.QScrollArea()
+        self.original_display.setObjectName("originalImageDisplay")
+        orig_scroll = QtWidgets.QScrollArea(original_container)
         orig_scroll.setWidgetResizable(True)
         orig_scroll.setWidget(self.original_display)
-        orig_layout.addWidget(orig_scroll)
-        original_group.setLayout(orig_layout)
-        images_layout.addWidget(original_group)
+        orig_scroll.setObjectName("originalImageScrollArea")
+        original_layout.addWidget(orig_scroll)
 
-        preview_group = QtWidgets.QGroupBox("Pre-Processing Preview")
-        prev_layout = QtWidgets.QVBoxLayout()
+        preview_container = QtWidgets.QWidget(self.image_splitter)
+        preview_layout = QtWidgets.QVBoxLayout(preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(6)
+        preview_header = QtWidgets.QLabel("Pre-Processing Preview", preview_container)
+        preview_header.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        preview_header.setObjectName("previewImageHeader")
+        preview_layout.addWidget(preview_header)
         self.preview_display = ImageDisplayWidget(use_rgb_format=False)
-        prev_scroll = QtWidgets.QScrollArea()
+        self.preview_display.setObjectName("previewImageDisplay")
+        prev_scroll = QtWidgets.QScrollArea(preview_container)
         prev_scroll.setWidgetResizable(True)
         prev_scroll.setWidget(self.preview_display)
-        prev_layout.addWidget(prev_scroll)
-        preview_group.setLayout(prev_layout)
-        images_layout.addWidget(preview_group)
-        main_layout.addLayout(images_layout)
+        prev_scroll.setObjectName("previewImageScrollArea")
+        preview_layout.addWidget(prev_scroll)
 
+        self.image_splitter.addWidget(original_container)
+        self.image_splitter.addWidget(preview_container)
+        self.image_splitter.setObjectName("imageDisplaySplitter")
+        self.image_splitter.setChildrenCollapsible(False)
+        self.image_splitter.setStretchFactor(0, 1)
+        self.image_splitter.setStretchFactor(1, 1)
+
+        self.pipeline_overview_list = QtWidgets.QListWidget()
+        self.pipeline_overview_list.setObjectName("pipelineOverviewList")
+        self.pipeline_overview_list.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.pipeline_overview_list.setAlternatingRowColors(True)
+        self.pipeline_overview_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.NoSelection
+        )
+        self.pipeline_overview_list.setAccessibleName("Pipeline overview")
+        self.pipeline_overview_list.setWhatsThis(
+            "Displays the ordered preprocessing steps currently enabled in the pipeline."
+        )
+
+        pipeline_widget = QtWidgets.QWidget()
+        pipeline_layout = QtWidgets.QVBoxLayout(pipeline_widget)
+        pipeline_layout.setContentsMargins(6, 6, 6, 6)
+        pipeline_layout.setSpacing(6)
         self.pipeline_label = QtWidgets.QLabel("Current Pipeline: (none)")
-        main_layout.addWidget(self.pipeline_label)
+        self.pipeline_label.setObjectName("pipelineSummaryLabel")
+        self.pipeline_label.setWordWrap(True)
+        self.pipeline_label.setAccessibleDescription(
+            "Text summary of the current preprocessing pipeline order."
+        )
+        pipeline_layout.addWidget(self.pipeline_label)
+        pipeline_layout.addWidget(self.pipeline_overview_list)
+
+        self.pipeline_dock = QtWidgets.QDockWidget("Pipeline Overview", self)
+        self.pipeline_dock.setObjectName("pipelineOverviewDock")
+        self.pipeline_dock.setWidget(pipeline_widget)
+        self.pipeline_dock.setAllowedAreas(
+            QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea
+        )
+        self.pipeline_dock.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetMovable
+            | QtWidgets.QDockWidget.DockWidgetFloatable
+        )
+        self.pipeline_dock.setToolTip("Pipeline overview panel (Ctrl+1)")
+        self.pipeline_dock.setWhatsThis(
+            "Dockable panel summarizing the active preprocessing pipeline."
+        )
+        self.pipeline_dock.setAccessibleName("Pipeline overview dock")
+        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.pipeline_dock)
+
+        self.diagnostics_log = QtWidgets.QPlainTextEdit()
+        self.diagnostics_log.setReadOnly(True)
+        self.diagnostics_log.setObjectName("diagnosticsLog")
+        self.diagnostics_log.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.diagnostics_log.setAccessibleName("Diagnostics log viewer")
+        self.diagnostics_log.setPlaceholderText(
+            "Diagnostics output will appear here when verbose logging is enabled."
+        )
+        self.diagnostics_log.setWhatsThis(
+            "Displays diagnostic messages and progress updates emitted during preprocessing."
+        )
+
+        diagnostics_widget = QtWidgets.QWidget()
+        diagnostics_layout = QtWidgets.QVBoxLayout(diagnostics_widget)
+        diagnostics_layout.setContentsMargins(6, 6, 6, 6)
+        diagnostics_layout.setSpacing(6)
+        diagnostics_layout.addWidget(self.diagnostics_log)
+
+        self.diagnostics_dock = QtWidgets.QDockWidget("Diagnostics Log", self)
+        self.diagnostics_dock.setObjectName("diagnosticsLogDock")
+        self.diagnostics_dock.setWidget(diagnostics_widget)
+        self.diagnostics_dock.setAllowedAreas(
+            QtCore.Qt.BottomDockWidgetArea
+            | QtCore.Qt.LeftDockWidgetArea
+            | QtCore.Qt.RightDockWidgetArea
+        )
+        self.diagnostics_dock.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetMovable
+            | QtWidgets.QDockWidget.DockWidgetFloatable
+        )
+        self.diagnostics_dock.setToolTip("Diagnostics log panel (Ctrl+2)")
+        self.diagnostics_dock.setWhatsThis(
+            "Dockable panel displaying diagnostic output and log messages."
+        )
+        self.diagnostics_dock.setAccessibleName("Diagnostics log dock")
+        self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.diagnostics_dock)
+
+        self.module_controls_container = QtWidgets.QScrollArea()
+        self.module_controls_container.setWidgetResizable(True)
+        self.module_controls_container.setObjectName("moduleControlsScrollArea")
+        self.module_controls_container.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.module_controls_container.setAccessibleName("Module parameter controls")
+        self.module_controls_container.setWhatsThis(
+            "Holds parameter controls for the selected preprocessing module."
+        )
+        module_controls_content = QtWidgets.QWidget()
+        self.module_controls_layout = QtWidgets.QVBoxLayout(module_controls_content)
+        self.module_controls_layout.setContentsMargins(6, 6, 6, 6)
+        self.module_controls_layout.setSpacing(6)
+        self.module_controls_placeholder = QtWidgets.QLabel(
+            "Select a module to configure its parameters."
+        )
+        self.module_controls_placeholder.setWordWrap(True)
+        self.module_controls_layout.addWidget(self.module_controls_placeholder)
+        self.module_controls_layout.addStretch(1)
+        self.module_controls_container.setWidget(module_controls_content)
+
+        self.module_controls_dock = QtWidgets.QDockWidget(
+            "Module Parameters", self
+        )
+        self.module_controls_dock.setObjectName("moduleParametersDock")
+        self.module_controls_dock.setWidget(self.module_controls_container)
+        self.module_controls_dock.setAllowedAreas(
+            QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea
+        )
+        self.module_controls_dock.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetMovable
+            | QtWidgets.QDockWidget.DockWidgetFloatable
+        )
+        self.module_controls_dock.setToolTip("Module parameter controls (Ctrl+3)")
+        self.module_controls_dock.setWhatsThis(
+            "Dockable panel hosting the configuration widgets for preprocessing modules."
+        )
+        self.module_controls_dock.setAccessibleName("Module parameter dock")
+        self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.module_controls_dock)
+
+        self._pipeline_focus_shortcut = QtWidgets.QShortcut(
+            QtGui.QKeySequence("Ctrl+1"), self
+        )
+        self._pipeline_focus_shortcut.setObjectName("pipelineFocusShortcut")
+        self._pipeline_focus_shortcut.activated.connect(
+            lambda: self.pipeline_overview_list.setFocus(QtCore.Qt.ShortcutFocusReason)
+        )
+
+        self._diagnostics_focus_shortcut = QtWidgets.QShortcut(
+            QtGui.QKeySequence("Ctrl+2"), self
+        )
+        self._diagnostics_focus_shortcut.setObjectName("diagnosticsFocusShortcut")
+        self._diagnostics_focus_shortcut.activated.connect(
+            lambda: self.diagnostics_log.setFocus(QtCore.Qt.ShortcutFocusReason)
+        )
+
+        self._module_controls_focus_shortcut = QtWidgets.QShortcut(
+            QtGui.QKeySequence("Ctrl+3"), self
+        )
+        self._module_controls_focus_shortcut.setObjectName(
+            "moduleControlsFocusShortcut"
+        )
+        self._module_controls_focus_shortcut.activated.connect(
+            lambda: self.module_controls_container.setFocus(
+                QtCore.Qt.ShortcutFocusReason
+            )
+        )
+
         self.statusBar().showMessage("Ready")
 
         self.build_menu()
@@ -459,6 +619,11 @@ class MainWindow(QtWidgets.QMainWindow):
         order = [step.name for step in self.pipeline_manager.iter_enabled_steps()]
         text = "Current Pipeline: " + " -> ".join(order) if order else "Current Pipeline: (none)"
         self.pipeline_label.setText(text)
+        self.pipeline_overview_list.clear()
+        if order:
+            self.pipeline_overview_list.addItems(order)
+        else:
+            self.pipeline_overview_list.addItem("(no enabled steps)")
 
     def rebuild_pipeline(self):
         self.pipeline = build_preprocessing_pipeline(self.app_core, self.pipeline_manager)
@@ -595,10 +760,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.thread_controller.task_canceled.connect(self._on_task_canceled)
         self.thread_controller.task_failed.connect(self._on_task_failed)
 
+    def _append_diagnostic_message(self, message: str) -> None:
+        if not hasattr(self, "diagnostics_log") or self.diagnostics_log is None:
+            return
+        timestamp = QtCore.QDateTime.currentDateTime().toString(
+            "yyyy-MM-dd hh:mm:ss.zzz"
+        )
+        self.diagnostics_log.appendPlainText(f"[{timestamp}] {message}")
+
     @QtCore.pyqtSlot(str)
     def _on_task_started(self, description: str) -> None:
         self._current_task_description = description or "Processing"
         self.statusBar().showMessage(self._current_task_description)
+        self._append_diagnostic_message(f"{self._current_task_description} started.")
 
     @QtCore.pyqtSlot(int)
     def _on_task_progress(self, value: int) -> None:
@@ -611,6 +785,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._progress_dialog.reset()
             self._progress_dialog = None
         self.statusBar().showMessage("Ready", 1500)
+        self._append_diagnostic_message(
+            f"{self._current_task_description or 'Processing'} completed successfully."
+        )
 
     @QtCore.pyqtSlot()
     def _on_task_canceled(self) -> None:
@@ -618,6 +795,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._progress_dialog.reset()
             self._progress_dialog = None
         self.statusBar().showMessage("Operation canceled", 2000)
+        self._append_diagnostic_message(
+            f"{self._current_task_description or 'Processing'} was canceled."
+        )
 
     @QtCore.pyqtSlot(Exception, str)
     def _on_task_failed(self, error: Exception, stack: str) -> None:
@@ -625,6 +805,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._progress_dialog.reset()
             self._progress_dialog = None
         logging.error("Pipeline execution failed: %s\n%s", error, stack)
+        self._append_diagnostic_message(
+            f"{self._current_task_description or 'Processing'} failed: {error}"
+        )
         QtWidgets.QMessageBox.critical(
             self,
             "Processing Error",
