@@ -7,8 +7,9 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from yam_processor.core.module_loader import ModuleLoader, ModuleRegistry
-from yam_processor.core.settings_manager import SettingsManager
 from yam_processor.core.threading import ThreadController
+
+from .settings import SettingsManager
 
 from .logging import init_logging
 
@@ -85,6 +86,14 @@ class AppCore:
         if self.settings_manager is None:
             raise RuntimeError("Settings manager not initialised. Call bootstrap() first.")
         return self.settings_manager.backend
+
+    @property
+    def settings(self) -> SettingsManager:
+        """Return the high level settings manager."""
+
+        if self.settings_manager is None:
+            raise RuntimeError("Settings manager not initialised. Call bootstrap() first.")
+        return self.settings_manager
 
     def ensure_bootstrapped(self) -> None:
         """Ensure :meth:`bootstrap` has been executed."""

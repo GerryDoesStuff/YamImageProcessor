@@ -31,4 +31,6 @@ if __name__ == "__main__":
             diagnostics_enabled=arguments.diagnostics,
         )
     )
+    app_core.ensure_bootstrapped()
+    _ = app_core.settings
     sys.exit(main(app_core))

@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import concurrent.futures
-import json
 import logging
 import os
 import sys
 import traceback
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
@@ -21,7 +21,7 @@ from processing.extraction_pipeline import (
     ProcessingPipeline,
     build_extraction_pipeline,
     build_extraction_pipeline_from_dict,
-    get_extraction_settings_dict,
+    get_extraction_settings_snapshot,
 )
 
 try:
@@ -409,7 +409,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_preview: Optional[np.ndarray] = None
         self.undo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.redo_stack: List[Tuple[np.ndarray, List[str]]] = []
-        self.settings = self.app_core.qsettings
+        self.settings_manager = self.app_core.settings
+        self.settings = self.settings_manager.backend
         # Set default extraction settings if not present
         default_methods = ["Region Properties", "Hu Moments", "LBP", "Haralick", "Gabor",
                            "Fourier", "HOG", "Histogram", "Fractal", "Approximate Shape"]
@@ -556,7 +557,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Reset all extraction settings to defaults.")
 
     def preview_update(self, func_name: str, new_params: Dict[str, Any]):
-        temp_dict = get_extraction_settings_dict(self.settings)
+        temp_dict = get_extraction_settings_snapshot(self.settings_manager)
         # For simplicity, use the same method name for keys
         temp_dict[f"extraction/{func_name}/enabled"] = True
         order = temp_dict.get("extraction/order", "")
@@ -1016,54 +1017,10 @@ class MainWindow(QtWidgets.QMainWindow):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import Extraction Settings", "", "JSON Files (*.json)")
         if filename:
             try:
-                with open(filename, 'r') as f:
-                    settings_data = json.load(f)
-                order = settings_data.get("order", [])
-                self.settings.setValue("extraction/order", ",".join(order))
-                if "Region Properties" in settings_data:
-                    self.settings.setValue("extraction/Region Properties/enabled", True)
-                if "Hu Moments" in settings_data:
-                    self.settings.setValue("extraction/Hu Moments/enabled", True)
-                if "LBP" in settings_data:
-                    params = settings_data["LBP"]
-                    self.settings.setValue("extraction/LBP/P", params.get("P", 8))
-                    self.settings.setValue("extraction/LBP/R", params.get("R", 1.0))
-                    self.settings.setValue("extraction/LBP/enabled", True)
-                if "Haralick" in settings_data:
-                    params = settings_data["Haralick"]
-                    self.settings.setValue("extraction/Haralick/distance", params.get("distance", 1))
-                    self.settings.setValue("extraction/Haralick/angle", params.get("angle", 0.0))
-                    self.settings.setValue("extraction/Haralick/enabled", True)
-                if "Gabor" in settings_data:
-                    params = settings_data["Gabor"]
-                    self.settings.setValue("extraction/Gabor/ksize", params.get("ksize", 21))
-                    self.settings.setValue("extraction/Gabor/sigma", params.get("sigma", 5.0))
-                    self.settings.setValue("extraction/Gabor/theta", params.get("theta", 0.0))
-                    self.settings.setValue("extraction/Gabor/lambd", params.get("lambd", 10.0))
-                    self.settings.setValue("extraction/Gabor/gamma", params.get("gamma", 0.5))
-                    self.settings.setValue("extraction/Gabor/psi", params.get("psi", 0.0))
-                    self.settings.setValue("extraction/Gabor/enabled", True)
-                if "Fourier" in settings_data:
-                    params = settings_data["Fourier"]
-                    self.settings.setValue("extraction/Fourier/num_coeff", params.get("num_coeff", 10))
-                    self.settings.setValue("extraction/Fourier/enabled", True)
-                if "HOG" in settings_data:
-                    params = settings_data["HOG"]
-                    self.settings.setValue("extraction/HOG/orientations", params.get("orientations", 9))
-                    self.settings.setValue("extraction/HOG/ppc", params.get("ppc", 8))
-                    self.settings.setValue("extraction/HOG/cpb", params.get("cpb", 3))
-                    self.settings.setValue("extraction/HOG/enabled", True)
-                if "Histogram" in settings_data:
-                    self.settings.setValue("extraction/Histogram/enabled", True)
-                if "Fractal" in settings_data:
-                    params = settings_data["Fractal"]
-                    self.settings.setValue("extraction/Fractal/min_box_size", params.get("min_box_size", 2))
-                    self.settings.setValue("extraction/Fractal/enabled", True)
-                if "Approximate Shape" in settings_data:
-                    params = settings_data["Approximate Shape"]
-                    self.settings.setValue("extraction/Approximate Shape/error_threshold", params.get("error_threshold", 1.0))
-                    self.settings.setValue("extraction/Approximate Shape/enabled", True)
-                self.settings.sync()
+                payload = Path(filename).read_text(encoding="utf-8")
+                self.settings_manager.from_json(
+                    payload, prefix="extraction/", clear=True
+                )
                 self.rebuild_pipeline()
                 if self.base_image is not None:
                     self.committed_image = self.pipeline.apply(self.base_image)
@@ -1077,53 +1034,10 @@ class MainWindow(QtWidgets.QMainWindow):
         filename, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export Extraction Settings", "", "JSON Files (*.json)")
         if filename:
             try:
-                settings_data = {"order": self.order_manager.get_order()}
-                for method in self.order_manager.get_order():
-                    if method == "Region Properties":
-                        settings_data["Region Properties"] = {}
-                    elif method == "Hu Moments":
-                        settings_data["Hu Moments"] = {}
-                    elif method == "LBP":
-                        settings_data["LBP"] = {
-                            "P": self.settings.value("extraction/LBP/P"),
-                            "R": self.settings.value("extraction/LBP/R")
-                        }
-                    elif method == "Haralick":
-                        settings_data["Haralick"] = {
-                            "distance": self.settings.value("extraction/Haralick/distance"),
-                            "angle": self.settings.value("extraction/Haralick/angle")
-                        }
-                    elif method == "Gabor":
-                        settings_data["Gabor"] = {
-                            "ksize": self.settings.value("extraction/Gabor/ksize"),
-                            "sigma": self.settings.value("extraction/Gabor/sigma"),
-                            "theta": self.settings.value("extraction/Gabor/theta"),
-                            "lambd": self.settings.value("extraction/Gabor/lambd"),
-                            "gamma": self.settings.value("extraction/Gabor/gamma"),
-                            "psi": self.settings.value("extraction/Gabor/psi")
-                        }
-                    elif method == "Fourier":
-                        settings_data["Fourier"] = {
-                            "num_coeff": self.settings.value("extraction/Fourier/num_coeff")
-                        }
-                    elif method == "HOG":
-                        settings_data["HOG"] = {
-                            "orientations": self.settings.value("extraction/HOG/orientations"),
-                            "ppc": self.settings.value("extraction/HOG/ppc"),
-                            "cpb": self.settings.value("extraction/HOG/cpb")
-                        }
-                    elif method == "Histogram":
-                        settings_data["Histogram"] = {}
-                    elif method == "Fractal":
-                        settings_data["Fractal"] = {
-                            "min_box_size": self.settings.value("extraction/Fractal/min_box_size")
-                        }
-                    elif method == "Approximate Shape":
-                        settings_data["Approximate Shape"] = {
-                            "error_threshold": self.settings.value("extraction/Approximate Shape/error_threshold")
-                        }
-                with open(filename, 'w') as f:
-                    json.dump(settings_data, f, indent=2)
+                payload = self.settings_manager.to_json(
+                    prefix="extraction/", strip_prefix=True
+                )
+                Path(filename).write_text(payload, encoding="utf-8")
                 QtWidgets.QMessageBox.information(self, "Settings Export", "Extraction settings exported successfully.")
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Error", f"Failed to export extraction settings: {e}")
