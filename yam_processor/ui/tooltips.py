@@ -94,11 +94,15 @@ def _history_snapshot(controller: Optional["PipelineController"]) -> str:
 
 def build_main_window_tooltips(
     controller: Optional["PipelineController"],
+    *,
+    version: Optional[str] = None,
 ) -> dict[str, str]:
     """Construct descriptive tooltips for :class:`~yam_processor.ui.main_window.MainWindow`.
 
     The strings surface pipeline-aware guidance and are shared by menus, docks,
     and any future toolbars via their underlying :class:`QtWidgets.QAction`.
+    ``version`` may be supplied to surface the running build in the About
+    tooltip.
     """
 
     return {
@@ -197,6 +201,13 @@ def build_main_window_tooltips(
             (
                 QtCore.QCoreApplication.translate(
                     "ToolTips", "Show version and licensing details for Yam Image Processor."
+                ),
+                (
+                    QtCore.QCoreApplication.translate(
+                        "ToolTips", "Current version: {version}"
+                    ).format(version=version)
+                    if version and version != "unknown"
+                    else ""
                 ),
             )
         ),

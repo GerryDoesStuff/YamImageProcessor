@@ -34,6 +34,33 @@ app_core.bootstrap()
 This repository currently focuses on establishing the foundation; additional processing pipelines and UI components can be buil
 t on top of the provided scaffolding.
 
+## Version metadata
+
+The installed build number is exposed via `yam_processor.__version__` and
+`yam_processor.get_version()`. When package metadata is unavailable—such as
+running from a source checkout—the helper returns `"0.0.0"` so tooling still
+receives a stable string.
+
+## Update checks and telemetry
+
+Update polling and telemetry are opt-in features controlled on
+`AppConfiguration`. Both remain disabled by default:
+
+```python
+from yam_processor import AppConfiguration, AppCore
+
+config = AppConfiguration(
+    enable_update_checks=True,
+    telemetry_opt_in=True,
+)
+app_core = AppCore(config)
+app_core.bootstrap()
+```
+
+When telemetry is opted in, the flag is persisted through the settings manager
+under the `telemetry/opt_in` key. Provide an explicit developer- or user-facing
+toggle before enabling telemetry so consent is always captured.
+
 ## Localisation
 
 Strings in the Qt user interface are translation-ready.  See
