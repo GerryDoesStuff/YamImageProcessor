@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import concurrent.futures
-import json
 import logging
 import os
 import sys
 import traceback
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
@@ -20,7 +20,7 @@ from processing.segmentation_pipeline import (
     ProcessingPipeline,
     build_segmentation_pipeline,
     build_segmentation_pipeline_from_dict,
-    get_settings_dict,
+    get_settings_snapshot,
 )
 
 #####################################
@@ -856,7 +856,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.redo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.current_preview: Optional[np.ndarray] = None
-        self.settings = self.app_core.qsettings
+        self.settings_manager = self.app_core.settings
+        self.settings = self.settings_manager.backend
         # Set default segmentation parameters if missing.
         if not self.settings.contains("segmentation/Global/threshold"):
             self.settings.setValue("segmentation/Global/threshold", 127)
@@ -1086,7 +1087,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Reset to original settings.")
 
     def preview_update(self, func_name: str, new_params: Dict[str, Any]):
-        temp_dict = get_settings_dict(self.settings)
+        temp_dict = get_settings_snapshot(self.settings_manager)
         mapping = {
             "Global": "Global",
             "Otsu": "Otsu",
@@ -1620,7 +1621,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "Mass Processing", "No supported image files found in the selected folder.")
             return
         # Capture pipeline settings into a dictionary for processing.
-        pipeline_settings = get_settings_dict(self.settings)
+        pipeline_settings = get_settings_snapshot(self.settings_manager)
         processed_count = 0
         errors = []
         with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -1640,27 +1641,10 @@ class MainWindow(QtWidgets.QMainWindow):
         filename, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export Pipeline Settings", "", "JSON Files (*.json)")
         if filename:
             try:
-                pipeline_data = {"order": self.order_manager.get_order()}
-                for func in self.order_manager.get_order():
-                    if func == "Global":
-                        pipeline_data["Global"] = {"threshold": self.settings.value("segmentation/Global/threshold")}
-                    elif func == "Otsu":
-                        pipeline_data["Otsu"] = {}
-                    elif func == "Adaptive":
-                        pipeline_data["Adaptive"] = {"block_size": self.settings.value("segmentation/Adaptive/block_size"),
-                                                     "C": self.settings.value("segmentation/Adaptive/C")}
-                    elif func == "Edge":
-                        pipeline_data["Edge"] = {"low_threshold": self.settings.value("segmentation/Edge/low_threshold"),
-                                                 "high_threshold": self.settings.value("segmentation/Edge/high_threshold"),
-                                                 "aperture_size": self.settings.value("segmentation/Edge/aperture_size")}
-                    elif func == "Watershed":
-                        pipeline_data["Watershed"] = {"kernel_size": self.settings.value("segmentation/Watershed/kernel_size"),
-                                                      "opening_iterations": self.settings.value("segmentation/Watershed/opening_iterations"),
-                                                      "dilation_iterations": self.settings.value("segmentation/Watershed/dilation_iterations"),
-                                                      "distance_threshold_factor": self.settings.value("segmentation/Watershed/distance_threshold_factor")}
-                    # Export other functions similarly...
-                with open(filename, 'w') as f:
-                    json.dump(pipeline_data, f, indent=2)
+                payload = self.settings_manager.to_json(
+                    prefix="segmentation/", strip_prefix=True
+                )
+                Path(filename).write_text(payload, encoding="utf-8")
                 QtWidgets.QMessageBox.information(self, "Export Pipeline", "Pipeline settings exported successfully.")
             except Exception as e:
                 logging.exception("Error exporting pipeline.")
@@ -1670,36 +1654,10 @@ class MainWindow(QtWidgets.QMainWindow):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import Pipeline Settings", "", "JSON Files (*.json)")
         if filename:
             try:
-                with open(filename, 'r') as f:
-                    pipeline_data = json.load(f)
-                order = pipeline_data.get("order", [])
-                self.settings.setValue("segmentation/order", ",".join(order))
-                if "Global" in pipeline_data:
-                    params = pipeline_data["Global"]
-                    self.settings.setValue("segmentation/Global/threshold", params.get("threshold", 127))
-                    self.settings.setValue("segmentation/Global/enabled", True)
-                if "Otsu" in pipeline_data:
-                    self.settings.setValue("segmentation/Otsu/enabled", True)
-                if "Adaptive" in pipeline_data:
-                    params = pipeline_data["Adaptive"]
-                    self.settings.setValue("segmentation/Adaptive/block_size", params.get("block_size", 11))
-                    self.settings.setValue("segmentation/Adaptive/C", params.get("C", 2))
-                    self.settings.setValue("segmentation/Adaptive/enabled", True)
-                if "Edge" in pipeline_data:
-                    params = pipeline_data["Edge"]
-                    self.settings.setValue("segmentation/Edge/low_threshold", params.get("low_threshold", 50))
-                    self.settings.setValue("segmentation/Edge/high_threshold", params.get("high_threshold", 150))
-                    self.settings.setValue("segmentation/Edge/aperture_size", params.get("aperture_size", 3))
-                    self.settings.setValue("segmentation/Edge/enabled", True)
-                if "Watershed" in pipeline_data:
-                    params = pipeline_data["Watershed"]
-                    self.settings.setValue("segmentation/Watershed/kernel_size", params.get("kernel_size", 3))
-                    self.settings.setValue("segmentation/Watershed/opening_iterations", params.get("opening_iterations", 2))
-                    self.settings.setValue("segmentation/Watershed/dilation_iterations", params.get("dilation_iterations", 3))
-                    self.settings.setValue("segmentation/Watershed/distance_threshold_factor", params.get("distance_threshold_factor", 0.7))
-                    self.settings.setValue("segmentation/Watershed/enabled", True)
-                # Import other functions similarly...
-                self.settings.sync()
+                payload = Path(filename).read_text(encoding="utf-8")
+                self.settings_manager.from_json(
+                    payload, prefix="segmentation/", clear=True
+                )
                 self.rebuild_pipeline()
                 if self.base_image is not None:
                     self.committed_image = self.pipeline.apply(self.base_image)

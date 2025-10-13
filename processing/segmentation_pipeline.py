@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
@@ -29,6 +30,7 @@ from core.segmentation import (
     sobel_operator,
 )
 from core.segmentation import Detector  # type: ignore  # Detector defined alongside Preprocessor
+from core.settings import SettingsManager
 
 @dataclass
 class PipelineStep:
@@ -63,9 +65,20 @@ class ProcessingPipeline:
         return processed
 
 
-def get_settings_dict(app_core: AppCore) -> dict:
-    settings = app_core.qsettings
-    return {key: settings.value(key) for key in settings.allKeys()}
+def get_settings_snapshot(
+    source: AppCore | SettingsManager | Mapping[str, object],
+    *,
+    prefix: str | None = None,
+) -> Dict[str, Any]:
+    if isinstance(source, AppCore):
+        source.ensure_bootstrapped()
+        manager = source.settings
+        return manager.snapshot(prefix=prefix)
+    if isinstance(source, SettingsManager):
+        return source.snapshot(prefix=prefix)
+    if prefix is None:
+        return dict(source)
+    return {key: value for key, value in dict(source).items() if key.startswith(prefix)}
 
 
 def build_segmentation_pipeline_from_dict(
@@ -170,8 +183,15 @@ def build_segmentation_pipeline_from_dict(
         pipeline.add_step(PipelineStep(name=method, function=func, enabled=True, params=params))
     return pipeline
 
-def build_segmentation_pipeline(app_core: AppCore) -> ProcessingPipeline:
-    return build_segmentation_pipeline_from_dict(get_settings_dict(app_core), app_core)
+def build_segmentation_pipeline(
+    app_core: AppCore,
+    settings: Optional[SettingsManager | Mapping[str, object]] = None,
+) -> ProcessingPipeline:
+    if settings is None:
+        settings_dict = get_settings_snapshot(app_core, prefix="segmentation/")
+    else:
+        settings_dict = get_settings_snapshot(settings, prefix="segmentation/")
+    return build_segmentation_pipeline_from_dict(settings_dict, app_core)
 
 
 __all__ = [
@@ -179,5 +199,5 @@ __all__ = [
     "ProcessingPipeline",
     "build_segmentation_pipeline",
     "build_segmentation_pipeline_from_dict",
-    "get_settings_dict",
+    "get_settings_snapshot",
 ]

@@ -1,9 +1,9 @@
 """Qt widgets for the preprocessing application."""
 from __future__ import annotations
 
-import json
 import logging
 import os
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
@@ -16,7 +16,7 @@ from processing.preprocessing_pipeline import (
     PreprocessingPipeline,
     build_preprocessing_pipeline,
     build_preprocessing_pipeline_from_dict,
-    get_settings_dict,
+    get_settings_snapshot,
 )
 
 
@@ -420,7 +420,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.redo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.current_preview: Optional[np.ndarray] = None
-        self.settings = self.app_core.qsettings
+        self.settings_manager = self.app_core.settings
+        self.settings = self.settings_manager.backend
 
         if not self.settings.contains("preprocess/brightness_contrast/alpha"):
             self.settings.setValue("preprocess/brightness_contrast/alpha", 1.0)
@@ -675,46 +676,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if filename:
             try:
-                pipeline_data = {"order": self.order_manager.get_order()}
-                for func in self.order_manager.get_order():
-                    if func == "BrightnessContrast":
-                        pipeline_data["BrightnessContrast"] = {
-                            "alpha": self.settings.value("preprocess/brightness_contrast/alpha"),
-                            "beta": self.settings.value("preprocess/brightness_contrast/beta"),
-                        }
-                    elif func == "Gamma":
-                        pipeline_data["Gamma"] = {
-                            "gamma": self.settings.value("preprocess/gamma/value"),
-                        }
-                    elif func == "IntensityNormalization":
-                        pipeline_data["IntensityNormalization"] = {
-                            "alpha": self.settings.value("preprocess/normalize/alpha"),
-                            "beta": self.settings.value("preprocess/normalize/beta"),
-                        }
-                    elif func == "NoiseReduction":
-                        pipeline_data["NoiseReduction"] = {
-                            "method": self.settings.value("preprocess/noise_reduction/method"),
-                            "ksize": self.settings.value("preprocess/noise_reduction/ksize"),
-                        }
-                    elif func == "Sharpen":
-                        pipeline_data["Sharpen"] = {
-                            "strength": self.settings.value("preprocess/sharpen/strength"),
-                        }
-                    elif func == "SelectChannel":
-                        pipeline_data["SelectChannel"] = {
-                            "channel": self.settings.value("preprocess/select_channel/value"),
-                        }
-                    elif func == "Grayscale":
-                        pipeline_data["Grayscale"] = {}
-                    elif func == "Crop":
-                        pipeline_data["Crop"] = {
-                            "x_offset": self.settings.value("preprocess/crop/x_offset"),
-                            "y_offset": self.settings.value("preprocess/crop/y_offset"),
-                            "width": self.settings.value("preprocess/crop/width"),
-                            "height": self.settings.value("preprocess/crop/height"),
-                        }
-                with open(filename, "w", encoding="utf-8") as fh:
-                    json.dump(pipeline_data, fh, indent=2)
+                payload = self.settings_manager.to_json(
+                    prefix="preprocess/", strip_prefix=True
+                )
+                Path(filename).write_text(payload, encoding="utf-8")
                 QtWidgets.QMessageBox.information(self, "Pipeline Export", "Pipeline settings exported.")
             except Exception as exc:  # pragma: no cover - user feedback
                 QtWidgets.QMessageBox.critical(self, "Error", f"Failed to export pipeline: {exc}")
@@ -725,49 +690,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if filename:
             try:
-                with open(filename, "r", encoding="utf-8") as fh:
-                    pipeline_data = json.load(fh)
-                order = pipeline_data.get("order", [])
-                self.settings.setValue("preprocess/order", ",".join(order))
-
-                if "BrightnessContrast" in pipeline_data:
-                    params = pipeline_data["BrightnessContrast"]
-                    self.settings.setValue("preprocess/brightness_contrast/alpha", params.get("alpha", 1.0))
-                    self.settings.setValue("preprocess/brightness_contrast/beta", params.get("beta", 0))
-                    self.settings.setValue("preprocess/brightness_contrast/enabled", True)
-                if "Gamma" in pipeline_data:
-                    params = pipeline_data["Gamma"]
-                    self.settings.setValue("preprocess/gamma/value", params.get("gamma", 1.0))
-                    self.settings.setValue("preprocess/gamma/enabled", True)
-                if "IntensityNormalization" in pipeline_data:
-                    params = pipeline_data["IntensityNormalization"]
-                    self.settings.setValue("preprocess/normalize/alpha", params.get("alpha", 0))
-                    self.settings.setValue("preprocess/normalize/beta", params.get("beta", 255))
-                    self.settings.setValue("preprocess/normalize/enabled", True)
-                if "NoiseReduction" in pipeline_data:
-                    params = pipeline_data["NoiseReduction"]
-                    self.settings.setValue("preprocess/noise_reduction/method", params.get("method", "Gaussian"))
-                    self.settings.setValue("preprocess/noise_reduction/ksize", params.get("ksize", 5))
-                    self.settings.setValue("preprocess/noise_reduction/enabled", True)
-                if "Sharpen" in pipeline_data:
-                    params = pipeline_data["Sharpen"]
-                    self.settings.setValue("preprocess/sharpen/strength", params.get("strength", 1.0))
-                    self.settings.setValue("preprocess/sharpen/enabled", True)
-                if "SelectChannel" in pipeline_data:
-                    params = pipeline_data["SelectChannel"]
-                    self.settings.setValue("preprocess/select_channel/value", params.get("channel", "All"))
-                    self.settings.setValue("preprocess/select_channel/enabled", True)
-                if "Grayscale" in pipeline_data:
-                    self.settings.setValue("preprocess/grayscale", True)
-                if "Crop" in pipeline_data:
-                    params = pipeline_data["Crop"]
-                    self.settings.setValue("preprocess/crop/x_offset", params.get("x_offset", 0))
-                    self.settings.setValue("preprocess/crop/y_offset", params.get("y_offset", 0))
-                    self.settings.setValue("preprocess/crop/width", params.get("width", 100))
-                    self.settings.setValue("preprocess/crop/height", params.get("height", 100))
-                    self.settings.setValue("preprocess/crop/enabled", True)
-
-                self.settings.sync()
+                payload = Path(filename).read_text(encoding="utf-8")
+                self.settings_manager.from_json(
+                    payload, prefix="preprocess/", clear=True
+                )
                 self.rebuild_pipeline()
                 if self.base_image is not None:
                     self.committed_image = self.pipeline.apply(self.base_image)
@@ -836,7 +762,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.preview_display.set_image(self.current_preview)
 
     def preview_update(self, func_name: str, temp_params: Dict[str, Any]):
-        temp_dict = get_settings_dict(self.settings)
+        temp_dict = get_settings_snapshot(self.settings_manager)
         order = self.order_manager.get_order()
         if func_name not in order:
             order.append(func_name)

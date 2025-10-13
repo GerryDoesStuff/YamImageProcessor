@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
@@ -20,6 +21,7 @@ from core.extraction import (
     lbp_extraction,
     region_properties_extraction,
 )
+from core.settings import SettingsManager
 
 @dataclass
 class PipelineStep:
@@ -56,13 +58,20 @@ class ProcessingPipeline:
 # 5. SETTINGS FUNCTIONS FOR EXTRACTION PIPELINE
 #####################################
 
-def get_extraction_settings_dict(app_core: AppCore) -> dict:
-    settings = app_core.qsettings
-    d = {}
-    for key in settings.allKeys():
-        if key.startswith("extraction/"):
-            d[key] = settings.value(key)
-    return d
+def get_extraction_settings_snapshot(
+    source: AppCore | SettingsManager | Mapping[str, object],
+    *,
+    prefix: str | None = "extraction/",
+) -> Dict[str, Any]:
+    if isinstance(source, AppCore):
+        source.ensure_bootstrapped()
+        manager = source.settings
+        return manager.snapshot(prefix=prefix)
+    if isinstance(source, SettingsManager):
+        return source.snapshot(prefix=prefix)
+    if prefix is None:
+        return dict(source)
+    return {key: value for key, value in dict(source).items() if key.startswith(prefix or "")}
 
 
 def build_extraction_pipeline_from_dict(
@@ -117,11 +126,15 @@ def build_extraction_pipeline_from_dict(
         pipeline.add_step(PipelineStep(name=method, function=func, enabled=True, params=params))
     return pipeline
 
-def build_extraction_pipeline(app_core: AppCore) -> ProcessingPipeline:
-    return build_extraction_pipeline_from_dict(
-        get_extraction_settings_dict(app_core),
-        app_core,
-    )
+def build_extraction_pipeline(
+    app_core: AppCore,
+    settings: Optional[SettingsManager | Mapping[str, object]] = None,
+) -> ProcessingPipeline:
+    if settings is None:
+        settings_dict = get_extraction_settings_snapshot(app_core)
+    else:
+        settings_dict = get_extraction_settings_snapshot(settings)
+    return build_extraction_pipeline_from_dict(settings_dict, app_core)
 
 #####################################
 
@@ -131,5 +144,5 @@ __all__ = [
     "ProcessingPipeline",
     "build_extraction_pipeline",
     "build_extraction_pipeline_from_dict",
-    "get_extraction_settings_dict",
+    "get_extraction_settings_snapshot",
 ]
