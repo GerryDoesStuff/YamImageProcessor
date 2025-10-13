@@ -29,6 +29,9 @@ class AppConfiguration:
     application: str = "YamImageProcessor"
     log_directory: Optional[Path] = None
     plugin_packages: Sequence[str] = field(default_factory=lambda: ["yam_processor.plugins"])
+    module_paths: Sequence[Path] = field(
+        default_factory=lambda: [Path(__file__).resolve().parents[2] / "modules"]
+    )
     developer_diagnostics: bool = False
     enable_console_logging: bool = True
     max_log_bytes: int = 5 * 1024 * 1024
@@ -272,7 +275,7 @@ class AppCore:
         self.logger.debug("Thread controller initialised", extra={"component": "AppCore"})
 
     def _discover_plugins(self) -> None:
-        loader = ModuleLoader(self.config.plugin_packages)
+        loader = ModuleLoader(self.config.plugin_packages, self.config.module_paths)
         discovered = loader.discover()
         self.plugins = []
         for module in discovered:
