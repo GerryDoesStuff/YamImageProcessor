@@ -81,6 +81,12 @@ class SettingsManager:
             self._settings.setValue(key, value)
         self._settings.sync()
 
+    @property
+    def backend(self) -> Any:
+        """Return the underlying :class:`QSettings` compatible object."""
+
+        return self._settings
+
     def export_json(self, path: Path) -> None:
         path = Path(path)
         data = self.to_dict()

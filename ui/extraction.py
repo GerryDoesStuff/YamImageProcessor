@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from core.app_core import AppCore
 from core.extraction import Config, Loader, Preprocessor, parse_bool
 from processing.extraction_pipeline import (
     PipelineStep,
@@ -397,8 +398,9 @@ class ApproximateShapeDialog(QtWidgets.QDialog):
 #####################################
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self):
+    def __init__(self, app_core: AppCore):
         super().__init__()
+        self.app_core = app_core
         self.setWindowTitle("Microscopic Feature Extraction")
         self.resize(1200, 700)
         self.original_image: Optional[np.ndarray] = None
@@ -407,7 +409,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_preview: Optional[np.ndarray] = None
         self.undo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.redo_stack: List[Tuple[np.ndarray, List[str]]] = []
-        self.settings = QtCore.QSettings(Config.SETTINGS_ORG, Config.SETTINGS_APP)
+        self.settings = self.app_core.qsettings
         # Set default extraction settings if not present
         default_methods = ["Region Properties", "Hu Moments", "LBP", "Haralick", "Gabor",
                            "Fourier", "HOG", "Histogram", "Fractal", "Approximate Shape"]
@@ -460,7 +462,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_shortcut.activated.connect(self.undo)
         self.redo_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Y"), self)
         self.redo_shortcut.activated.connect(self.redo)
-        self.pipeline = build_extraction_pipeline(self.settings)
+        self.pipeline = build_extraction_pipeline(self.app_core)
         self.update_pipeline_label()
         if self.base_image is not None:
             self.update_preview()
@@ -470,7 +472,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pipeline_label.setText("Current Pipeline: " + " -> ".join(order) if order else "Current Pipeline: (none)")
 
     def rebuild_pipeline(self):
-        self.pipeline = build_extraction_pipeline(self.settings)
+        self.pipeline = build_extraction_pipeline(self.app_core)
         logging.debug("Pipeline rebuilt with steps: " + ", ".join([step.name for step in self.pipeline.steps]))
         self.update_pipeline_label()
 
@@ -563,7 +565,7 @@ class MainWindow(QtWidgets.QMainWindow):
         temp_dict["extraction/order"] = ",".join(temp_order)
         for key, value in new_params.items():
             temp_dict[f"extraction/{func_name}/{key}"] = value
-        temp_pipeline = build_extraction_pipeline_from_dict(temp_dict)
+        temp_pipeline = build_extraction_pipeline_from_dict(temp_dict, self.app_core)
         if self.base_image is not None:
             new_preview = temp_pipeline.apply(self.base_image)
             self.current_preview = new_preview.copy()
@@ -851,7 +853,7 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 self.original_image = Loader.load_image(filename)
                 self.base_image = self.original_image.copy()
-                self.committed_image = build_extraction_pipeline(self.settings).apply(self.base_image)
+                self.committed_image = build_extraction_pipeline(self.app_core).apply(self.base_image)
                 self.current_preview = self.committed_image.copy()
                 self.original_display.set_image(self.original_image)
                 self.preview_display.set_image(self.current_preview)

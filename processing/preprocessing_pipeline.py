@@ -1,10 +1,9 @@
 """Pipeline utilities for the preprocessing tool."""
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
 
-from PyQt5 import QtCore
-
+from core.app_core import AppCore
 from core.preprocessing import Preprocessor, parse_bool
 from yam_processor.processing import PipelineManager, PipelineStep
 
@@ -12,18 +11,24 @@ from yam_processor.processing import PipelineManager, PipelineStep
 class PreprocessingPipeline(PipelineManager):
     """Thin wrapper retaining the historical name used in the UI code."""
 
-    def __init__(self) -> None:
+    def __init__(self, app_core: Optional[AppCore] = None) -> None:
         super().__init__()
+        self.app_core = app_core
+        self.thread_controller = getattr(app_core, "thread_controller", None)
 
 
-def get_settings_dict(settings: QtCore.QSettings) -> Dict[str, object]:
-    """Extract a regular dictionary from :class:`QSettings`."""
+def get_settings_dict(app_core: AppCore) -> Dict[str, object]:
+    """Extract settings from :class:`AppCore` into a plain dictionary."""
 
+    settings = app_core.qsettings
     return {key: settings.value(key) for key in settings.allKeys()}
 
 
-def build_preprocessing_pipeline_from_dict(settings_dict: Dict[str, object]) -> PreprocessingPipeline:
-    pipeline = PreprocessingPipeline()
+def build_preprocessing_pipeline_from_dict(
+    settings_dict: Dict[str, object],
+    app_core: Optional[AppCore] = None,
+) -> PreprocessingPipeline:
+    pipeline = PreprocessingPipeline(app_core)
     order_str = settings_dict.get("preprocess/order", "") or ""
     order = order_str.split(",") if order_str else []
 
@@ -89,8 +94,8 @@ def build_preprocessing_pipeline_from_dict(settings_dict: Dict[str, object]) -> 
     return pipeline
 
 
-def build_preprocessing_pipeline(settings: QtCore.QSettings) -> PreprocessingPipeline:
-    return build_preprocessing_pipeline_from_dict(get_settings_dict(settings))
+def build_preprocessing_pipeline(app_core: AppCore) -> PreprocessingPipeline:
+    return build_preprocessing_pipeline_from_dict(get_settings_dict(app_core), app_core)
 
 
 __all__ = [

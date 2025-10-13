@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
-from PyQt5 import QtCore
 
+from core.app_core import AppCore
 from core.extraction import (
     approximate_shape_extraction,
     fourier_descriptors_extraction,
@@ -35,12 +35,17 @@ class PipelineStep:
         return self.function(image, **self.params)
 
 class ProcessingPipeline:
-    def __init__(self):
+    def __init__(self, app_core: Optional[AppCore] = None):
         self.steps: List[PipelineStep] = []
+        self.app_core = app_core
+        self.thread_controller = getattr(app_core, "thread_controller", None)
+
     def add_step(self, step: PipelineStep):
         self.steps.append(step)
+
     def clear_steps(self):
         self.steps = []
+
     def apply(self, image: np.ndarray) -> np.ndarray:
         processed = image.copy()
         for step in self.steps:
@@ -51,15 +56,20 @@ class ProcessingPipeline:
 # 5. SETTINGS FUNCTIONS FOR EXTRACTION PIPELINE
 #####################################
 
-def get_extraction_settings_dict(settings: QtCore.QSettings) -> dict:
+def get_extraction_settings_dict(app_core: AppCore) -> dict:
+    settings = app_core.qsettings
     d = {}
     for key in settings.allKeys():
         if key.startswith("extraction/"):
             d[key] = settings.value(key)
     return d
 
-def build_extraction_pipeline_from_dict(settings_dict: dict) -> ProcessingPipeline:
-    pipeline = ProcessingPipeline()
+
+def build_extraction_pipeline_from_dict(
+    settings_dict: dict,
+    app_core: Optional[AppCore] = None,
+) -> ProcessingPipeline:
+    pipeline = ProcessingPipeline(app_core)
     order_str = settings_dict.get("extraction/order", "")
     order = order_str.split(",") if order_str else []
     for method in order:
@@ -107,8 +117,11 @@ def build_extraction_pipeline_from_dict(settings_dict: dict) -> ProcessingPipeli
         pipeline.add_step(PipelineStep(name=method, function=func, enabled=True, params=params))
     return pipeline
 
-def build_extraction_pipeline(settings: QtCore.QSettings) -> ProcessingPipeline:
-    return build_extraction_pipeline_from_dict(get_extraction_settings_dict(settings))
+def build_extraction_pipeline(app_core: AppCore) -> ProcessingPipeline:
+    return build_extraction_pipeline_from_dict(
+        get_extraction_settings_dict(app_core),
+        app_core,
+    )
 
 #####################################
 

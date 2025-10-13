@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from core.app_core import AppCore
 from core.preprocessing import Config, Loader, Preprocessor, parse_bool
 from processing.preprocessing_pipeline import (
     PreprocessingPipeline,
@@ -407,8 +408,9 @@ class PipelineOrderManager:
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self):
+    def __init__(self, app_core: AppCore):
         super().__init__()
+        self.app_core = app_core
         self.setWindowTitle("Image Pre-Processing Module")
         self.resize(1200, 700)
         self.original_image: Optional[np.ndarray] = None
@@ -418,7 +420,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.redo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.current_preview: Optional[np.ndarray] = None
-        self.settings = QtCore.QSettings(Config.SETTINGS_ORG, Config.SETTINGS_APP)
+        self.settings = self.app_core.qsettings
 
         if not self.settings.contains("preprocess/brightness_contrast/alpha"):
             self.settings.setValue("preprocess/brightness_contrast/alpha", 1.0)
@@ -481,7 +483,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.redo_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Y"), self)
         self.redo_shortcut.activated.connect(self.redo)
 
-        self.pipeline = build_preprocessing_pipeline(self.settings)
+        self.pipeline = build_preprocessing_pipeline(self.app_core)
         self.update_pipeline_label()
         if self.base_image is not None:
             self.update_preview()
@@ -492,7 +494,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pipeline_label.setText(text)
 
     def rebuild_pipeline(self):
-        self.pipeline = build_preprocessing_pipeline(self.settings)
+        self.pipeline = build_preprocessing_pipeline(self.app_core)
         logging.debug("Pipeline rebuilt with steps: " + ", ".join(step.name for step in self.pipeline.steps))
         self.update_pipeline_label()
 
@@ -790,7 +792,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.original_image = image.copy()
         self.base_image = image.copy()
         self.committed_image = image.copy()
-        self.pipeline = build_preprocessing_pipeline(self.settings)
+        self.pipeline = build_preprocessing_pipeline(self.app_core)
         processed = self.pipeline.apply(image)
         self.current_preview = processed.copy()
         self.processing_image = processed
@@ -845,7 +847,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if func_name == "Crop":
             temp_dict["preprocess/crop/enabled"] = True
             temp_dict["preprocess/crop/apply_crop"] = False
-        temp_pipeline = build_preprocessing_pipeline_from_dict(temp_dict)
+        temp_pipeline = build_preprocessing_pipeline_from_dict(temp_dict, self.app_core)
         if self.base_image is not None:
             new_preview = temp_pipeline.apply(self.base_image)
             self.current_preview = new_preview.copy()

@@ -2,21 +2,33 @@
 from __future__ import annotations
 
 import sys
-import logging
+from typing import Optional
 
 from PyQt5 import QtWidgets
 
+from core.app_core import AppConfiguration, AppCore
+from core.segmentation import Config
 from ui.segmentation import MainWindow
 
 
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
+def main(app_core: Optional[AppCore] = None) -> int:
+    if app_core is None:
+        configuration = AppConfiguration(
+            organization=Config.SETTINGS_ORG,
+            application=Config.SETTINGS_APP,
+        )
+        app_core = AppCore(configuration)
 
+    app_core.ensure_bootstrapped()
 
-def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
-    window = MainWindow()
+    window = MainWindow(app_core)
     window.show()
-    return app.exec_()
+    exit_code = app.exec_()
+
+    app_core.shutdown()
+
+    return exit_code
 
 
 __all__ = ["main"]
