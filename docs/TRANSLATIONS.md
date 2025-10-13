@@ -2,7 +2,9 @@
 
 The Yam Image Processor uses Qt's translation system.  Application strings are
 wrapped with `self.tr()` or `QCoreApplication.translate()` so that `.qm`
-language packs can be loaded at runtime.
+language packs can be loaded at runtime.  Runtime loading is handled by
+`core.i18n.TranslationLoader`, which installs any compiled catalogues placed in
+the top-level `translations/` directory before windows are created.
 
 ## Requirements
 
@@ -23,8 +25,8 @@ language packs can be loaded at runtime.
 
    * `translations/yam_processor_<locale>.ts` – editable catalogue for Qt
      Linguist.
-   * `yam_processor/i18n/yam_processor_<locale>.qm` – compiled language pack
-     installed by the application at runtime.
+   * `translations/yam_processor_<locale>.qm` – compiled language pack loaded
+     by the desktop entry points.
 
    Set the `PYLUPDATE5` or `LRELEASE` environment variables to override the
    executables if they are not on your `PATH`.
@@ -34,23 +36,26 @@ language packs can be loaded at runtime.
 
 ## Packaging
 
-The compiled `.qm` files inside `yam_processor/i18n/` should be shipped with the
-application distribution (wheels, PyInstaller bundle, etc.).
+Ship the `.qm` files inside the repository-level `translations/` directory with
+any binary distribution (wheels, PyInstaller bundle, etc.).
 
 ## Selecting a Language at Runtime
 
-The bootstrap `AppCore` looks for translation packs inside
-`yam_processor/i18n/`.  It tries locales provided by
-`AppConfiguration.translation_locales` first.  When no explicit locale is
-configured it falls back to the Qt system UI languages.  Example:
+The lightweight `core.AppCore` exposes configuration flags that control the
+loader.  Override them before calling the module entry points if you want to
+force a specific locale or provide additional lookup directories:
 
 ```python
-from yam_processor import AppCore, AppConfiguration
+from core.app_core import AppConfiguration, AppCore
 
-config = AppConfiguration(translation_locales=("fr_FR",))
+config = AppConfiguration(
+    translation_locales=("fr_FR",),
+    translation_directories=["/opt/yam/translations", "./translations"],
+)
 app_core = AppCore(config)
-app_core.bootstrap()
+app_core.ensure_bootstrapped()
 ```
 
-Call `bootstrap()` after a `QApplication` has been created so the translation
-packages can be installed on the running `QCoreApplication` instance.
+The entry points (`preprocessing22`, `segmentation25`, `extraction18`) call
+`core.i18n.bootstrap_translations()` once a `QApplication` has been created so
+the language packs are installed before any top-level windows appear.

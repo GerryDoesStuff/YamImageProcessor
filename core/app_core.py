@@ -39,6 +39,11 @@ class AppConfiguration:
     autosave_interval_seconds: float = 120.0
     autosave_backup_retention: int = 5
     autosave_enabled_default: bool = True
+    translation_directories: Sequence[Path | str] = field(
+        default_factory=lambda: [Path(__file__).resolve().parent.parent / "translations"]
+    )
+    translation_locales: Sequence[str] = field(default_factory=tuple)
+    translation_prefix: str = "yam_processor"
 
 
 class AppCore:
