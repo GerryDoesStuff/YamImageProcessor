@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from yam_processor.core.module_loader import ModuleLoader, ModuleRegistry
 from yam_processor.core.threading import ThreadController
@@ -12,6 +12,7 @@ from yam_processor.core.threading import ThreadController
 from .settings import SettingsManager
 
 from .logging import init_logging
+from processing.pipeline_manager import PipelineManager, PipelineStep
 
 
 @dataclass
@@ -42,6 +43,8 @@ class AppCore:
         self.plugins: List[object] = []
         self._log_handler: Optional[logging.Handler] = None
         self._bootstrapped = False
+        self._preprocessing_manager: Optional[PipelineManager] = None
+        self._preprocessing_templates: Dict[str, PipelineStep] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle management
@@ -100,6 +103,94 @@ class AppCore:
 
         if not self._bootstrapped:
             self.bootstrap()
+
+    # ------------------------------------------------------------------
+    # Pipeline helpers
+    def get_preprocessing_pipeline_manager(self) -> PipelineManager:
+        if self._preprocessing_manager is None:
+            from core.preprocessing import Preprocessor
+
+            templates = {
+                "Grayscale": PipelineStep(
+                    "Grayscale", Preprocessor.to_grayscale, enabled=False
+                ),
+                "BrightnessContrast": PipelineStep(
+                    "BrightnessContrast",
+                    Preprocessor.adjust_contrast_brightness,
+                    enabled=False,
+                    params={"alpha": 1.0, "beta": 0},
+                ),
+                "Gamma": PipelineStep(
+                    "Gamma",
+                    Preprocessor.adjust_gamma,
+                    enabled=False,
+                    params={"gamma": 1.0},
+                ),
+                "IntensityNormalization": PipelineStep(
+                    "IntensityNormalization",
+                    Preprocessor.normalize_intensity,
+                    enabled=False,
+                    params={"alpha": 0, "beta": 255},
+                ),
+                "NoiseReduction": PipelineStep(
+                    "NoiseReduction",
+                    Preprocessor.noise_reduction,
+                    enabled=False,
+                    params={"method": "Gaussian", "ksize": 5},
+                ),
+                "Sharpen": PipelineStep(
+                    "Sharpen",
+                    Preprocessor.sharpen,
+                    enabled=False,
+                    params={"strength": 1.0},
+                ),
+                "SelectChannel": PipelineStep(
+                    "SelectChannel",
+                    Preprocessor.select_channel,
+                    enabled=False,
+                    params={"channel": "All"},
+                ),
+                "Crop": PipelineStep(
+                    "Crop",
+                    Preprocessor.crop_image,
+                    enabled=False,
+                    params={
+                        "x_offset": 0,
+                        "y_offset": 0,
+                        "width": 100,
+                        "height": 100,
+                        "apply_crop": False,
+                    },
+                ),
+            }
+            self._preprocessing_templates = templates
+            self._preprocessing_manager = PipelineManager(templates.values())
+        return self._preprocessing_manager
+
+    def preprocessing_step_template(self, name: str) -> PipelineStep:
+        return self._preprocessing_templates[name].clone()
+
+    def load_preprocessing_pipeline(self, payload: Dict[str, Any]) -> None:
+        manager = self.get_preprocessing_pipeline_manager()
+        templates = self._preprocessing_templates
+        steps: List[PipelineStep] = []
+        seen: set[str] = set()
+        for entry in payload.get("steps", []):
+            name = entry.get("name")
+            if not isinstance(name, str) or name not in templates:
+                continue
+            step = templates[name].clone()
+            step.enabled = bool(entry.get("enabled", step.enabled))
+            params = entry.get("params", {})
+            if isinstance(params, dict):
+                step.params.update(params)
+            steps.append(step)
+            seen.add(name)
+        for name, template in templates.items():
+            if name in seen:
+                continue
+            steps.append(template.clone())
+        manager.replace_steps(steps, preserve_history=True)
 
     # ------------------------------------------------------------------
     # Internal helpers

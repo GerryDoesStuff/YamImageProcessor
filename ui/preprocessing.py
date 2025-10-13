@@ -1,22 +1,22 @@
 """Qt widgets for the preprocessing application."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from core.app_core import AppCore
-from core.preprocessing import Config, Loader, Preprocessor, parse_bool
+from core.preprocessing import Config, Loader
+from processing.pipeline_manager import PipelineManager
 from processing.preprocessing_pipeline import (
     PreprocessingPipeline,
     build_preprocessing_pipeline,
-    build_preprocessing_pipeline_from_dict,
-    get_settings_snapshot,
 )
 
 
@@ -390,23 +390,6 @@ class CropDialog(QtWidgets.QDialog):
         self.height_spin.setValue(self.initial_height)
 
 
-class PipelineOrderManager:
-    def __init__(self, settings: QtCore.QSettings):
-        self.settings = settings
-
-    def get_order(self) -> List[str]:
-        order_str = self.settings.value("preprocess/order", "")
-        return order_str.split(",") if order_str else []
-
-    def set_order(self, order: List[str]):
-        self.settings.setValue("preprocess/order", ",".join(order))
-
-    def append_function(self, func_name: str):
-        order = self.get_order()
-        order.append(func_name)
-        self.set_order(order)
-
-
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, app_core: AppCore):
         super().__init__()
@@ -414,38 +397,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Image Pre-Processing Module")
         self.resize(1200, 700)
         self.original_image: Optional[np.ndarray] = None
-        self.processing_image: Optional[np.ndarray] = None
         self.base_image: Optional[np.ndarray] = None
         self.committed_image: Optional[np.ndarray] = None
-        self.undo_stack: List[Tuple[np.ndarray, List[str]]] = []
-        self.redo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.current_preview: Optional[np.ndarray] = None
-        self.settings_manager = self.app_core.settings
-        self.settings = self.settings_manager.backend
-
-        if not self.settings.contains("preprocess/brightness_contrast/alpha"):
-            self.settings.setValue("preprocess/brightness_contrast/alpha", 1.0)
-        if not self.settings.contains("preprocess/brightness_contrast/beta"):
-            self.settings.setValue("preprocess/brightness_contrast/beta", 0)
-        if not self.settings.contains("preprocess/gamma/value"):
-            self.settings.setValue("preprocess/gamma/value", 1.0)
-        if not self.settings.contains("preprocess/select_channel/value"):
-            self.settings.setValue("preprocess/select_channel/value", "All")
-
-        self.settings.setValue("preprocess/grayscale", False)
-        self.settings.setValue("preprocess/brightness_contrast/enabled", False)
-        self.settings.setValue("preprocess/gamma/enabled", False)
-        self.settings.setValue("preprocess/hist_eq/enabled", False)
-        self.settings.setValue("preprocess/noise_reduction/enabled", False)
-        self.settings.setValue("preprocess/sharpen/enabled", False)
-        self.settings.setValue("preprocess/select_channel/enabled", False)
-        self.settings.setValue("preprocess/crop/enabled", False)
-        self.settings.setValue("preprocess/crop/x_offset", 0)
-        self.settings.setValue("preprocess/crop/y_offset", 0)
-        self.settings.setValue("preprocess/crop/width", 100)
-        self.settings.setValue("preprocess/crop/height", 100)
-
-        self.order_manager = PipelineOrderManager(self.settings)
+        self.pipeline_manager: PipelineManager = (
+            self.app_core.get_preprocessing_pipeline_manager()
+        )
+        self.pipeline_manager.reset()
 
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
@@ -484,66 +442,48 @@ class MainWindow(QtWidgets.QMainWindow):
         self.redo_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Y"), self)
         self.redo_shortcut.activated.connect(self.redo)
 
-        self.pipeline = build_preprocessing_pipeline(self.app_core)
+        self.pipeline = build_preprocessing_pipeline(self.app_core, self.pipeline_manager)
         self.update_pipeline_label()
         if self.base_image is not None:
             self.update_preview()
 
     def update_pipeline_label(self):
-        order = self.order_manager.get_order()
+        order = [step.name for step in self.pipeline_manager.iter_enabled_steps()]
         text = "Current Pipeline: " + " -> ".join(order) if order else "Current Pipeline: (none)"
         self.pipeline_label.setText(text)
 
     def rebuild_pipeline(self):
-        self.pipeline = build_preprocessing_pipeline(self.app_core)
+        self.pipeline = build_preprocessing_pipeline(self.app_core, self.pipeline_manager)
         logging.debug("Pipeline rebuilt with steps: " + ", ".join(step.name for step in self.pipeline.steps))
         self.update_pipeline_label()
 
-    def get_preprocess_order(self) -> List[str]:
-        order_str = self.settings.value("preprocess/order", "")
-        return order_str.split(",") if order_str else []
-
-    def set_preprocess_order(self, order: List[str]):
-        self.settings.setValue("preprocess/order", ",".join(order))
-        self.update_pipeline_label()
-
-    def commit_preprocess(self, func_name: str):
-        self.order_manager.append_function(func_name)
-        self.update_pipeline_label()
-
-    def push_undo_state(self, backup: np.ndarray):
-        self.undo_stack.append((backup.copy(), self.get_preprocess_order()))
-        self.redo_stack.clear()
-
     def undo(self):
-        if self.undo_stack:
-            current_state = (self.committed_image.copy(), self.get_preprocess_order())
-            self.redo_stack.append(current_state)
-            prev_image, prev_order = self.undo_stack.pop()
-            self.committed_image = prev_image.copy()
-            self.set_preprocess_order(prev_order)
-            self.rebuild_pipeline()
-            if self.base_image is not None:
-                self.current_preview = self.pipeline.apply(self.base_image)
-                self.preview_display.set_image(self.current_preview)
-            self.update_undo_redo_actions()
+        snapshot = self.pipeline_manager.undo(current_image=self.committed_image)
+        if snapshot is None:
+            return
+        if snapshot.image is not None:
+            self.committed_image = snapshot.image.copy()
+        self.rebuild_pipeline()
+        if self.base_image is not None:
+            self.current_preview = self.pipeline.apply(self.base_image)
+            self.preview_display.set_image(self.current_preview)
+        self.update_undo_redo_actions()
 
     def redo(self):
-        if self.redo_stack:
-            current_state = (self.committed_image.copy(), self.get_preprocess_order())
-            self.undo_stack.append(current_state)
-            next_image, next_order = self.redo_stack.pop()
-            self.committed_image = next_image.copy()
-            self.set_preprocess_order(next_order)
-            self.rebuild_pipeline()
-            if self.base_image is not None:
-                self.current_preview = self.pipeline.apply(self.base_image)
-                self.preview_display.set_image(self.current_preview)
-            self.update_undo_redo_actions()
+        snapshot = self.pipeline_manager.redo(current_image=self.committed_image)
+        if snapshot is None:
+            return
+        if snapshot.image is not None:
+            self.committed_image = snapshot.image.copy()
+        self.rebuild_pipeline()
+        if self.base_image is not None:
+            self.current_preview = self.pipeline.apply(self.base_image)
+            self.preview_display.set_image(self.current_preview)
+        self.update_undo_redo_actions()
 
     def update_undo_redo_actions(self):
-        self.undo_action.setEnabled(len(self.undo_stack) > 0)
-        self.redo_action.setEnabled(len(self.redo_stack) > 0)
+        self.undo_action.setEnabled(self.pipeline_manager.can_undo())
+        self.redo_action.setEnabled(self.pipeline_manager.can_redo())
 
     def build_menu(self):
         menubar = self.menuBar()
@@ -619,28 +559,18 @@ class MainWindow(QtWidgets.QMainWindow):
         pre_menu.addAction(crop_action)
 
     def reset_all(self):
-        self.settings.setValue("preprocess/grayscale", False)
-        self.settings.setValue("preprocess/brightness_contrast/enabled", False)
-        self.settings.setValue("preprocess/brightness_contrast/alpha", 1.0)
-        self.settings.setValue("preprocess/brightness_contrast/beta", 0)
-        self.settings.setValue("preprocess/gamma/enabled", False)
-        self.settings.setValue("preprocess/gamma/value", 1.0)
-        self.settings.setValue("preprocess/noise_reduction/enabled", False)
-        self.settings.setValue("preprocess/sharpen/enabled", False)
-        self.settings.setValue("preprocess/select_channel/enabled", False)
-        self.settings.setValue("preprocess/select_channel/value", "All")
-        self.settings.setValue("preprocess/crop/enabled", False)
-        self.settings.setValue("preprocess/crop/x_offset", 0)
-        self.settings.setValue("preprocess/crop/y_offset", 0)
-        self.settings.setValue("preprocess/crop/width", 100)
-        self.settings.setValue("preprocess/crop/height", 100)
-        self.order_manager.set_order([])
+        backup = None if self.committed_image is None else self.committed_image.copy()
+        self.pipeline_manager.push_state(image=backup)
+        self.pipeline_manager.replace_steps(
+            self.pipeline_manager.template_steps(), preserve_history=True
+        )
         self.rebuild_pipeline()
         if self.base_image is not None:
-            self.committed_image = self.base_image.copy()
+            self.committed_image = self.pipeline.apply(self.base_image)
             self.current_preview = self.committed_image.copy()
             self.preview_display.set_image(self.current_preview)
             self.statusBar().showMessage("Reset all processing to defaults.")
+        self.update_undo_redo_actions()
 
     def mass_preprocess(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder for Mass Pre-Process")
@@ -676,9 +606,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if filename:
             try:
-                payload = self.settings_manager.to_json(
-                    prefix="preprocess/", strip_prefix=True
-                )
+                payload = json.dumps(self.pipeline_manager.to_dict(), indent=2)
                 Path(filename).write_text(payload, encoding="utf-8")
                 QtWidgets.QMessageBox.information(self, "Pipeline Export", "Pipeline settings exported.")
             except Exception as exc:  # pragma: no cover - user feedback
@@ -691,15 +619,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if filename:
             try:
                 payload = Path(filename).read_text(encoding="utf-8")
-                self.settings_manager.from_json(
-                    payload, prefix="preprocess/", clear=True
+                data = json.loads(payload)
+                self.pipeline_manager.push_state(
+                    image=None if self.committed_image is None else self.committed_image.copy()
                 )
+                self.app_core.load_preprocessing_pipeline(data)
                 self.rebuild_pipeline()
                 if self.base_image is not None:
                     self.committed_image = self.pipeline.apply(self.base_image)
                     self.current_preview = self.committed_image.copy()
                     self.preview_display.set_image(self.current_preview)
                 QtWidgets.QMessageBox.information(self, "Pipeline Import", "Pipeline settings imported and applied.")
+                self.update_undo_redo_actions()
             except Exception as exc:  # pragma: no cover - user feedback
                 QtWidgets.QMessageBox.critical(self, "Error", f"Failed to import pipeline: {exc}")
 
@@ -718,14 +649,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.original_image = image.copy()
         self.base_image = image.copy()
         self.committed_image = image.copy()
-        self.pipeline = build_preprocessing_pipeline(self.app_core)
+        self.pipeline = build_preprocessing_pipeline(self.app_core, self.pipeline_manager)
         processed = self.pipeline.apply(image)
         self.current_preview = processed.copy()
-        self.processing_image = processed
         self.original_display.set_image(self.original_image)
         self.preview_display.set_image(processed)
-        self.undo_stack.clear()
-        self.redo_stack.clear()
+        self.pipeline_manager.clear_history()
         self.update_undo_redo_actions()
         self.statusBar().showMessage(f"Loaded image: {filename}")
 
@@ -747,42 +676,38 @@ class MainWindow(QtWidgets.QMainWindow):
             self.preview_display.set_image(processed)
 
     def toggle_grayscale(self):
-        current_state = parse_bool(self.settings.value("preprocess/grayscale", False))
-        new_state = not current_state
-        self.settings.setValue("preprocess/grayscale", new_state)
-        if new_state:
-            self.commit_preprocess("Grayscale")
-        else:
-            order = [item for item in self.order_manager.get_order() if item != "Grayscale"]
-            self.order_manager.set_order(order)
+        backup = None if self.committed_image is None else self.committed_image.copy()
+        self.pipeline_manager.push_state(image=backup)
+        self.pipeline_manager.toggle_step("Grayscale")
         self.rebuild_pipeline()
         if self.base_image is not None:
             self.committed_image = self.pipeline.apply(self.base_image)
             self.current_preview = self.committed_image.copy()
             self.preview_display.set_image(self.current_preview)
+        self.update_undo_redo_actions()
 
     def preview_update(self, func_name: str, temp_params: Dict[str, Any]):
-        temp_dict = get_settings_snapshot(self.settings_manager)
-        order = self.order_manager.get_order()
-        if func_name not in order:
-            order.append(func_name)
-        temp_dict["preprocess/order"] = ",".join(order)
-        for key, value in temp_params.items():
-            temp_key = f"preprocess/{func_name.lower()}/{key}"
-            temp_dict[temp_key] = value
+        if self.base_image is None:
+            return
+        temp_manager = self.pipeline_manager.clone()
+        try:
+            step = temp_manager.get_step(func_name)
+        except KeyError:
+            return
+        step.enabled = True
+        step.params.update(temp_params)
         if func_name == "Crop":
-            temp_dict["preprocess/crop/enabled"] = True
-            temp_dict["preprocess/crop/apply_crop"] = False
-        temp_pipeline = build_preprocessing_pipeline_from_dict(temp_dict, self.app_core)
-        if self.base_image is not None:
-            new_preview = temp_pipeline.apply(self.base_image)
-            self.current_preview = new_preview.copy()
-            self.preview_display.set_image(new_preview)
+            step.params["apply_crop"] = False
+        temp_pipeline = build_preprocessing_pipeline(self.app_core, temp_manager)
+        new_preview = temp_pipeline.apply(self.base_image)
+        self.current_preview = new_preview.copy()
+        self.preview_display.set_image(new_preview)
 
     def show_brightness_contrast_dialog(self):
-        backup = self.committed_image.copy()
-        current_alpha = float(self.settings.value("preprocess/brightness_contrast/alpha", 1.0))
-        current_beta = int(self.settings.value("preprocess/brightness_contrast/beta", 0))
+        backup = None if self.committed_image is None else self.committed_image.copy()
+        step = self.pipeline_manager.get_step("BrightnessContrast")
+        current_alpha = float(step.params.get("alpha", 1.0))
+        current_beta = int(step.params.get("beta", 0))
         dlg = BrightnessContrastDialog(
             alpha=current_alpha,
             beta=current_beta,
@@ -792,42 +717,47 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             new_alpha, new_beta = dlg.get_values()
-            self.push_undo_state(backup)
-            self.commit_preprocess("BrightnessContrast")
-            self.settings.setValue("preprocess/brightness_contrast/enabled", True)
-            self.settings.setValue("preprocess/brightness_contrast/alpha", new_alpha)
-            self.settings.setValue("preprocess/brightness_contrast/beta", new_beta)
+            self.pipeline_manager.push_state(image=backup)
+            self.pipeline_manager.set_step_enabled("BrightnessContrast", True)
+            self.pipeline_manager.update_step_params(
+                "BrightnessContrast", {"alpha": new_alpha, "beta": new_beta}
+            )
             self.rebuild_pipeline()
             self.committed_image = self.pipeline.apply(self.base_image)
             self.current_preview = self.committed_image.copy()
             self.preview_display.set_image(self.current_preview)
+            self.update_undo_redo_actions()
         else:
-            self.preview_display.set_image(backup)
+            if backup is not None:
+                self.preview_display.set_image(backup)
 
     def show_gamma_dialog(self):
-        backup = self.committed_image.copy()
-        current_gamma = float(self.settings.value("preprocess/gamma/value", 1.0))
+        backup = None if self.committed_image is None else self.committed_image.copy()
+        step = self.pipeline_manager.get_step("Gamma")
+        current_gamma = float(step.params.get("gamma", 1.0))
         dlg = GammaDialog(
             gamma=current_gamma,
             preview_callback=lambda g: self.preview_update("Gamma", {"gamma": g}),
         )
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             new_gamma = dlg.get_value()
-            self.push_undo_state(backup)
-            self.commit_preprocess("Gamma")
-            self.settings.setValue("preprocess/gamma/enabled", True)
-            self.settings.setValue("preprocess/gamma/value", new_gamma)
+            self.pipeline_manager.push_state(image=backup)
+            self.pipeline_manager.set_step_enabled("Gamma", True)
+            self.pipeline_manager.update_step_params("Gamma", {"gamma": new_gamma})
             self.rebuild_pipeline()
             self.committed_image = self.pipeline.apply(self.base_image)
             self.current_preview = self.committed_image.copy()
             self.preview_display.set_image(self.current_preview)
+            self.update_undo_redo_actions()
         else:
-            self.preview_display.set_image(backup)
+            if backup is not None:
+                self.preview_display.set_image(backup)
 
     def show_normalize_dialog(self):
-        backup = self.committed_image.copy()
-        current_alpha = int(self.settings.value("preprocess/normalize/alpha", 0))
-        current_beta = int(self.settings.value("preprocess/normalize/beta", 255))
+        backup = None if self.committed_image is None else self.committed_image.copy()
+        step = self.pipeline_manager.get_step("IntensityNormalization")
+        current_alpha = int(step.params.get("alpha", 0))
+        current_beta = int(step.params.get("beta", 255))
         dlg = NormalizeDialog(
             alpha=current_alpha,
             beta=current_beta,
@@ -837,22 +767,25 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             new_alpha, new_beta = dlg.get_values()
-            self.push_undo_state(backup)
-            self.commit_preprocess("IntensityNormalization")
-            self.settings.setValue("preprocess/normalize/enabled", True)
-            self.settings.setValue("preprocess/normalize/alpha", new_alpha)
-            self.settings.setValue("preprocess/normalize/beta", new_beta)
+            self.pipeline_manager.push_state(image=backup)
+            self.pipeline_manager.set_step_enabled("IntensityNormalization", True)
+            self.pipeline_manager.update_step_params(
+                "IntensityNormalization", {"alpha": new_alpha, "beta": new_beta}
+            )
             self.rebuild_pipeline()
             self.committed_image = self.pipeline.apply(self.base_image)
             self.current_preview = self.committed_image.copy()
             self.preview_display.set_image(self.current_preview)
+            self.update_undo_redo_actions()
         else:
-            self.preview_display.set_image(backup)
+            if backup is not None:
+                self.preview_display.set_image(backup)
 
     def show_noise_reduction_dialog(self):
-        backup = self.committed_image.copy()
-        current_method = self.settings.value("preprocess/noise_reduction/method", "Gaussian")
-        current_ksize = int(self.settings.value("preprocess/noise_reduction/ksize", 5))
+        backup = None if self.committed_image is None else self.committed_image.copy()
+        step = self.pipeline_manager.get_step("NoiseReduction")
+        current_method = step.params.get("method", "Gaussian")
+        current_ksize = int(step.params.get("ksize", 5))
         dlg = NoiseReductionDialog(
             method=current_method,
             ksize=current_ksize,
@@ -862,64 +795,75 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             new_method, new_ksize = dlg.get_values()
-            self.push_undo_state(backup)
-            self.commit_preprocess("NoiseReduction")
-            self.settings.setValue("preprocess/noise_reduction/enabled", True)
-            self.settings.setValue("preprocess/noise_reduction/method", new_method)
-            self.settings.setValue("preprocess/noise_reduction/ksize", new_ksize)
+            self.pipeline_manager.push_state(image=backup)
+            self.pipeline_manager.set_step_enabled("NoiseReduction", True)
+            self.pipeline_manager.update_step_params(
+                "NoiseReduction", {"method": new_method, "ksize": new_ksize}
+            )
             self.rebuild_pipeline()
             self.committed_image = self.pipeline.apply(self.base_image)
             self.current_preview = self.committed_image.copy()
             self.preview_display.set_image(self.current_preview)
+            self.update_undo_redo_actions()
         else:
-            self.preview_display.set_image(backup)
+            if backup is not None:
+                self.preview_display.set_image(backup)
 
     def show_sharpen_dialog(self):
-        backup = self.committed_image.copy()
-        current_strength = float(self.settings.value("preprocess/sharpen/strength", 1.0))
+        backup = None if self.committed_image is None else self.committed_image.copy()
+        step = self.pipeline_manager.get_step("Sharpen")
+        current_strength = float(step.params.get("strength", 1.0))
         dlg = SharpenDialog(
             strength=current_strength,
             preview_callback=lambda s: self.preview_update("Sharpen", {"strength": s}),
         )
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             new_strength = dlg.get_value()
-            self.push_undo_state(backup)
-            self.commit_preprocess("Sharpen")
-            self.settings.setValue("preprocess/sharpen/enabled", True)
-            self.settings.setValue("preprocess/sharpen/strength", new_strength)
+            self.pipeline_manager.push_state(image=backup)
+            self.pipeline_manager.set_step_enabled("Sharpen", True)
+            self.pipeline_manager.update_step_params(
+                "Sharpen", {"strength": new_strength}
+            )
             self.rebuild_pipeline()
             self.committed_image = self.pipeline.apply(self.base_image)
             self.current_preview = self.committed_image.copy()
             self.preview_display.set_image(self.current_preview)
+            self.update_undo_redo_actions()
         else:
-            self.preview_display.set_image(backup)
+            if backup is not None:
+                self.preview_display.set_image(backup)
 
     def show_select_channel_dialog(self):
-        backup = self.committed_image.copy()
-        current_channel = self.settings.value("preprocess/select_channel/value", "All")
+        backup = None if self.committed_image is None else self.committed_image.copy()
+        step = self.pipeline_manager.get_step("SelectChannel")
+        current_channel = step.params.get("channel", "All")
         dlg = SelectChannelDialog(
             current_channel=current_channel,
             preview_callback=lambda c: self.preview_update("SelectChannel", {"channel": c}),
         )
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             new_channel = dlg.get_value()
-            self.push_undo_state(backup)
-            self.commit_preprocess("SelectChannel")
-            self.settings.setValue("preprocess/select_channel/enabled", True)
-            self.settings.setValue("preprocess/select_channel/value", new_channel)
+            self.pipeline_manager.push_state(image=backup)
+            self.pipeline_manager.set_step_enabled("SelectChannel", True)
+            self.pipeline_manager.update_step_params(
+                "SelectChannel", {"channel": new_channel}
+            )
             self.rebuild_pipeline()
             self.committed_image = self.pipeline.apply(self.base_image)
             self.current_preview = self.committed_image.copy()
             self.preview_display.set_image(self.current_preview)
+            self.update_undo_redo_actions()
         else:
-            self.preview_display.set_image(backup)
+            if backup is not None:
+                self.preview_display.set_image(backup)
 
     def show_crop_dialog(self):
-        backup = self.committed_image.copy()
-        current_x = int(self.settings.value("preprocess/crop/x_offset", 0))
-        current_y = int(self.settings.value("preprocess/crop/y_offset", 0))
-        current_width = int(self.settings.value("preprocess/crop/width", 100))
-        current_height = int(self.settings.value("preprocess/crop/height", 100))
+        backup = None if self.committed_image is None else self.committed_image.copy()
+        step = self.pipeline_manager.get_step("Crop")
+        current_x = int(step.params.get("x_offset", 0))
+        current_y = int(step.params.get("y_offset", 0))
+        current_width = int(step.params.get("width", 100))
+        current_height = int(step.params.get("height", 100))
         dlg = CropDialog(
             x_offset=current_x,
             y_offset=current_y,
@@ -931,19 +875,26 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             new_x, new_y, new_width, new_height = dlg.get_values()
-            self.push_undo_state(backup)
-            self.commit_preprocess("Crop")
-            self.settings.setValue("preprocess/crop/enabled", True)
-            self.settings.setValue("preprocess/crop/x_offset", new_x)
-            self.settings.setValue("preprocess/crop/y_offset", new_y)
-            self.settings.setValue("preprocess/crop/width", new_width)
-            self.settings.setValue("preprocess/crop/height", new_height)
+            self.pipeline_manager.push_state(image=backup)
+            self.pipeline_manager.set_step_enabled("Crop", True)
+            self.pipeline_manager.update_step_params(
+                "Crop",
+                {
+                    "x_offset": new_x,
+                    "y_offset": new_y,
+                    "width": new_width,
+                    "height": new_height,
+                    "apply_crop": True,
+                },
+            )
             self.rebuild_pipeline()
             self.committed_image = self.pipeline.apply(self.base_image)
             self.current_preview = self.committed_image.copy()
             self.preview_display.set_image(self.current_preview)
+            self.update_undo_redo_actions()
         else:
-            self.preview_display.set_image(backup)
+            if backup is not None:
+                self.preview_display.set_image(backup)
 
     def showEvent(self, event):  # pragma: no cover - Qt virtual
         super().showEvent(event)
@@ -958,7 +909,6 @@ __all__ = [
     "MainWindow",
     "NoiseReductionDialog",
     "NormalizeDialog",
-    "PipelineOrderManager",
     "SelectChannelDialog",
     "SharpenDialog",
 ]
