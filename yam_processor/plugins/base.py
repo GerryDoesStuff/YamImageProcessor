@@ -36,7 +36,22 @@ class ModuleMetadata:
 
 @dataclass
 class ModuleCapabilities:
-    """Capability flags advertised by a module implementation."""
+    """Capability flags advertised by a module implementation.
+
+    Modules that mutate their input buffers in place or that require a GPU
+    accelerator should mirror those requirements onto their pipeline steps via
+    :class:`~yam_processor.processing.StepExecutionMetadata`. The metadata is
+    serialised with the pipeline, allowing the runtime to reuse numpy buffers
+    when ``supports_inplace`` is set and to delegate GPU bound work when
+    ``requires_gpu`` is ``True``. Authors can construct the metadata directly::
+
+        StepExecutionMetadata(supports_inplace=True, requires_gpu=True)
+
+    and attach it when creating :class:`~yam_processor.processing.PipelineStep`
+    instances. Keeping the module-level capability flags and per-step metadata
+    aligned helps user interfaces communicate the module's execution
+    characteristics accurately.
+    """
 
     supports_batch: bool = False
     requires_gpu: bool = False

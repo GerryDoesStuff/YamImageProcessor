@@ -13,12 +13,47 @@ import traceback
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Protocol
 
 import numpy as np
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class StepExecutionMetadata:
+    """Hints controlling how a :class:`PipelineStep` should be executed."""
+
+    supports_inplace: bool = False
+    requires_gpu: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "supports_inplace": self.supports_inplace,
+            "requires_gpu": self.requires_gpu,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "StepExecutionMetadata":
+        return cls(
+            supports_inplace=bool(data.get("supports_inplace", False)),
+            requires_gpu=bool(data.get("requires_gpu", False)),
+        )
+
+    def is_default(self) -> bool:
+        return not (self.supports_inplace or self.requires_gpu)
+
+
+class GpuExecutor(Protocol):
+    """Protocol describing GPU execution helpers."""
+
+    def execute(
+        self,
+        step: "PipelineStep",
+        image: np.ndarray,
+    ) -> np.ndarray:
+        """Execute ``step`` on ``image`` using the accelerator."""
 
 
 @dataclass
@@ -38,12 +73,17 @@ class PipelineStep:
         Keyword arguments that will be forwarded to ``function`` during
         execution. The parameters are stored so they can be serialised to disk
         and restored later.
+    execution:
+        Optional hints describing how the step prefers to be executed. These
+        hints are serialised with the step so they can be restored across
+        sessions.
     """
 
     name: str
     function: Callable[..., np.ndarray]
     enabled: bool = True
     params: Dict[str, Any] = field(default_factory=dict)
+    execution: StepExecutionMetadata = field(default_factory=StepExecutionMetadata)
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         """Execute the step against ``image`` if it is enabled."""
@@ -51,8 +91,22 @@ class PipelineStep:
         if not self.enabled:
             LOGGER.debug("Skipping disabled step: %s", self.name)
             return image
+        if self.execution.requires_gpu:
+            LOGGER.debug(
+                "Step '%s' marked for GPU execution; executing on CPU fallback", self.name
+            )
         LOGGER.debug("Applying step '%s' with params %s", self.name, self.params)
-        return self.function(image, **self.params)
+        result = self.function(image, **self.params)
+        if result is None:
+            result = image
+        if self.execution.supports_inplace:
+            if result is image:
+                return image
+            if isinstance(result, np.ndarray) and result.shape == image.shape:
+                if result.dtype == image.dtype:
+                    image[...] = result
+                    return image
+        return result
 
     def clone(self) -> "PipelineStep":
         """Return a lightweight copy of the step preserving the function."""
@@ -62,12 +116,23 @@ class PipelineStep:
             function=self.function,
             enabled=self.enabled,
             params=copy.deepcopy(self.params),
+            execution=StepExecutionMetadata(
+                supports_inplace=self.execution.supports_inplace,
+                requires_gpu=self.execution.requires_gpu,
+            ),
         )
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialise the step into a JSON friendly structure."""
 
-        return {"name": self.name, "enabled": self.enabled, "params": copy.deepcopy(self.params)}
+        payload: Dict[str, Any] = {
+            "name": self.name,
+            "enabled": self.enabled,
+            "params": copy.deepcopy(self.params),
+        }
+        if not self.execution.is_default():
+            payload["execution"] = self.execution.to_dict()
+        return payload
 
     @classmethod
     def from_dict(
@@ -93,6 +158,7 @@ class PipelineStep:
             function=function,
             enabled=bool(data.get("enabled", True)),
             params=copy.deepcopy(data.get("params", {})),
+            execution=StepExecutionMetadata.from_dict(data.get("execution", {})),
         )
 
 
@@ -303,6 +369,7 @@ class PipelineManager:
         *,
         cache_dir: Optional[os.PathLike[str] | str] = None,
         recovery_root: Optional[os.PathLike[str] | str] = None,
+        gpu_executor: Optional[GpuExecutor] = None,
     ) -> None:
         self.steps: List[PipelineStep] = list(steps or [])
         self._undo_stack: List[PipelineHistoryEntry] = []
@@ -317,6 +384,7 @@ class PipelineManager:
         self._recovery_root = Path(recovery_base)
         self._recovery_root.mkdir(parents=True, exist_ok=True)
         self._last_failure: Optional[PipelineFailure] = None
+        self._gpu_executor: Optional[GpuExecutor] = gpu_executor
 
     @classmethod
     def set_default_cache_directory(cls, path: Optional[os.PathLike[str] | str]) -> None:
@@ -341,6 +409,11 @@ class PipelineManager:
             base = Path(tempfile.gettempdir()) / "yam_processor" / "recovery"
         base.mkdir(parents=True, exist_ok=True)
         self._recovery_root = base
+
+    def set_gpu_executor(self, executor: Optional[GpuExecutor]) -> None:
+        """Register the accelerator used for GPU-only steps."""
+
+        self._gpu_executor = executor
 
     # ------------------------------------------------------------------
     # Step management helpers
@@ -520,7 +593,7 @@ class PipelineManager:
         cache_directory = os.fspath(cache_dir) if cache_dir is not None else self._cache_dir
         for step in self.steps:
             try:
-                processed = step.apply(processed)
+                processed = self._run_step(step, processed)
             except Exception as exc:
                 traceback_text = traceback.format_exc()
                 recovery_path = self._write_recovery_trace(step.name, traceback_text)
@@ -554,6 +627,42 @@ class PipelineManager:
         )
         self._last_execution_entry = entry.clone()
         return processed
+
+    def _run_step(self, step: PipelineStep, image: np.ndarray) -> np.ndarray:
+        """Execute ``step`` honouring execution metadata."""
+
+        if not step.enabled:
+            return image
+
+        if step.execution.requires_gpu:
+            if self._gpu_executor is None:
+                LOGGER.warning(
+                    "Step '%s' requires GPU execution but no executor is configured; falling back to CPU.",
+                    step.name,
+                )
+                result = step.function(image, **step.params)
+            else:
+                result = self._gpu_executor.execute(step, image)
+        else:
+            result = step.function(image, **step.params)
+
+        if result is None:
+            result = image
+
+        if step.execution.supports_inplace:
+            if result is image:
+                return image
+            if isinstance(result, np.ndarray) and result.shape == image.shape:
+                if image.dtype == result.dtype:
+                    image[...] = result
+                    return image
+            LOGGER.debug(
+                "Step '%s' advertised in-place support but returned incompatible buffer; using returned value.",
+                step.name,
+            )
+            return result
+
+        return result
 
     def last_failure(self) -> Optional[PipelineFailure]:
         """Return the most recent pipeline failure, if any."""
