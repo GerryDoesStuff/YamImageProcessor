@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import threading
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -394,6 +395,12 @@ class CropDialog(QtWidgets.QDialog):
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    pipelineDockVisibilityChanged = QtCore.pyqtSignal(bool)
+    moduleControlsDockVisibilityChanged = QtCore.pyqtSignal(bool)
+    diagnosticsDockVisibilityChanged = QtCore.pyqtSignal(bool)
+    diagnosticsLoggingToggled = QtCore.pyqtSignal(bool)
+    moduleActivated = QtCore.pyqtSignal(str)
+
     def __init__(self, app_core: AppCore):
         super().__init__()
         self.app_core = app_core
@@ -466,6 +473,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pipeline_overview_list.setWhatsThis(
             "Displays the ordered preprocessing steps currently enabled in the pipeline."
         )
+        self.pipeline_overview_list.setContextMenuPolicy(
+            QtCore.Qt.CustomContextMenu
+        )
+        self.pipeline_overview_list.customContextMenuRequested.connect(
+            self._show_module_context_menu
+        )
 
         pipeline_widget = QtWidgets.QWidget()
         pipeline_layout = QtWidgets.QVBoxLayout(pipeline_widget)
@@ -496,6 +509,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.pipeline_dock.setAccessibleName("Pipeline overview dock")
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.pipeline_dock)
+        self.pipeline_dock.visibilityChanged.connect(
+            self._on_pipeline_dock_visibility_changed
+        )
 
         self.diagnostics_log = QtWidgets.QPlainTextEdit()
         self.diagnostics_log.setReadOnly(True)
@@ -533,6 +549,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.diagnostics_dock.setAccessibleName("Diagnostics log dock")
         self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.diagnostics_dock)
+        self.diagnostics_dock.visibilityChanged.connect(
+            self._on_diagnostics_dock_visibility_changed
+        )
 
         self.module_controls_container = QtWidgets.QScrollArea()
         self.module_controls_container.setWidgetResizable(True)
@@ -572,6 +591,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.module_controls_dock.setAccessibleName("Module parameter dock")
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.module_controls_dock)
+        self.module_controls_dock.visibilityChanged.connect(
+            self._on_module_controls_dock_visibility_changed
+        )
+
+        self._module_action_lookup: Dict[
+            Tuple[str, str, Tuple[str, ...]], QtWidgets.QAction
+        ] = {}
 
         self._pipeline_focus_shortcut = QtWidgets.QShortcut(
             QtGui.QKeySequence("Ctrl+1"), self
@@ -667,6 +693,7 @@ class MainWindow(QtWidgets.QMainWindow):
         menubar.clear()
 
         menu_cache: Dict[Tuple[str, ...], QtWidgets.QMenu] = {}
+        self._module_action_lookup.clear()
 
         def ensure_menu(path: Tuple[str, ...]) -> QtWidgets.QMenu:
             if path in menu_cache:
@@ -683,58 +710,210 @@ class MainWindow(QtWidgets.QMainWindow):
 
         file_menu = ensure_menu(("File",))
 
-        load_action = QtWidgets.QAction("Load Image", self)
-        load_action.triggered.connect(self.load_image)
-        file_menu.addAction(load_action)
+        self.load_image_action = QtWidgets.QAction("&Load Image…", self)
+        self.load_image_action.setShortcut(QtGui.QKeySequence.Open)
+        self.load_image_action.setShortcutVisibleInContextMenu(True)
+        self.load_image_action.setStatusTip("Load an image for preprocessing")
+        self.load_image_action.triggered.connect(self.load_image)
+        file_menu.addAction(self.load_image_action)
 
-        save_action = QtWidgets.QAction("Save Pre-Processed Image", self)
-        save_action.triggered.connect(self.save_processed_image)
-        file_menu.addAction(save_action)
+        self.save_processed_image_action = QtWidgets.QAction(
+            "&Save Pre-Processed Image…", self
+        )
+        self.save_processed_image_action.setShortcut(QtGui.QKeySequence.Save)
+        self.save_processed_image_action.setShortcutVisibleInContextMenu(True)
+        self.save_processed_image_action.setStatusTip(
+            "Persist the currently committed preprocessing result"
+        )
+        self.save_processed_image_action.triggered.connect(
+            self.save_processed_image
+        )
+        file_menu.addAction(self.save_processed_image_action)
 
-        mass_pp_action = QtWidgets.QAction("Mass Pre-Process Folder", self)
-        mass_pp_action.triggered.connect(self.mass_preprocess)
-        file_menu.addAction(mass_pp_action)
+        file_menu.addSeparator()
 
-        imp_action = QtWidgets.QAction("Import Pipeline Settings", self)
-        imp_action.triggered.connect(self.import_pipeline)
-        file_menu.addAction(imp_action)
+        self.mass_preprocess_action = QtWidgets.QAction(
+            "Mass Pre-Process &Folder…", self
+        )
+        self.mass_preprocess_action.setShortcut("Ctrl+Shift+M")
+        self.mass_preprocess_action.setShortcutVisibleInContextMenu(True)
+        self.mass_preprocess_action.setStatusTip(
+            "Apply the active pipeline to every image in a folder"
+        )
+        self.mass_preprocess_action.triggered.connect(self.mass_preprocess)
+        file_menu.addAction(self.mass_preprocess_action)
 
-        exp_action = QtWidgets.QAction("Export Pipeline Settings", self)
-        exp_action.triggered.connect(self.export_pipeline)
-        file_menu.addAction(exp_action)
+        file_menu.addSeparator()
+
+        self.import_pipeline_action = QtWidgets.QAction(
+            "&Import Pipeline Settings…", self
+        )
+        self.import_pipeline_action.setShortcut("Ctrl+I")
+        self.import_pipeline_action.setShortcutVisibleInContextMenu(True)
+        self.import_pipeline_action.setStatusTip(
+            "Load preprocessing pipeline settings from disk"
+        )
+        self.import_pipeline_action.triggered.connect(self.import_pipeline)
+        file_menu.addAction(self.import_pipeline_action)
+
+        self.export_pipeline_action = QtWidgets.QAction(
+            "E&xport Pipeline Settings…", self
+        )
+        self.export_pipeline_action.setShortcut("Ctrl+Shift+E")
+        self.export_pipeline_action.setShortcutVisibleInContextMenu(True)
+        self.export_pipeline_action.setStatusTip(
+            "Save preprocessing pipeline settings to disk"
+        )
+        self.export_pipeline_action.triggered.connect(self.export_pipeline)
+        file_menu.addAction(self.export_pipeline_action)
 
         edit_menu = ensure_menu(("Edit",))
-        self.undo_action = QtWidgets.QAction("Undo", self)
+        self.undo_action = QtWidgets.QAction("&Undo", self)
+        self.undo_action.setShortcut(QtGui.QKeySequence.Undo)
+        self.undo_action.setShortcutVisibleInContextMenu(True)
         self.undo_action.triggered.connect(self.undo)
         self.undo_action.setEnabled(False)
         edit_menu.addAction(self.undo_action)
 
-        self.redo_action = QtWidgets.QAction("Redo", self)
+        self.redo_action = QtWidgets.QAction("&Redo", self)
+        self.redo_action.setShortcut(QtGui.QKeySequence.Redo)
+        self.redo_action.setShortcutVisibleInContextMenu(True)
         self.redo_action.triggered.connect(self.redo)
         self.redo_action.setEnabled(False)
         edit_menu.addAction(self.redo_action)
 
-        reset_action = QtWidgets.QAction("Reset All", self)
-        reset_action.triggered.connect(self.reset_all)
-        edit_menu.addAction(reset_action)
+        edit_menu.addSeparator()
+
+        self.reset_pipeline_action = QtWidgets.QAction("Reset &All", self)
+        self.reset_pipeline_action.setShortcut("Ctrl+Shift+R")
+        self.reset_pipeline_action.setShortcutVisibleInContextMenu(True)
+        self.reset_pipeline_action.setStatusTip(
+            "Restore the preprocessing pipeline to default settings"
+        )
+        self.reset_pipeline_action.triggered.connect(self.reset_all)
+        edit_menu.addAction(self.reset_pipeline_action)
+
+        view_menu = ensure_menu(("View",))
+
+        self.show_pipeline_dock_action = QtWidgets.QAction(
+            "Pipeline Overview", self
+        )
+        self.show_pipeline_dock_action.setCheckable(True)
+        self.show_pipeline_dock_action.setChecked(self.pipeline_dock.isVisible())
+        self.show_pipeline_dock_action.setShortcut("Alt+1")
+        self.show_pipeline_dock_action.setStatusTip(
+            "Show or hide the pipeline overview dock"
+        )
+        self.show_pipeline_dock_action.toggled.connect(
+            self.pipeline_dock.setVisible
+        )
+        view_menu.addAction(self.show_pipeline_dock_action)
+
+        self.show_diagnostics_dock_action = QtWidgets.QAction(
+            "Diagnostics Log", self
+        )
+        self.show_diagnostics_dock_action.setCheckable(True)
+        self.show_diagnostics_dock_action.setChecked(
+            self.diagnostics_dock.isVisible()
+        )
+        self.show_diagnostics_dock_action.setShortcut("Alt+2")
+        self.show_diagnostics_dock_action.setStatusTip(
+            "Show or hide the diagnostics log dock"
+        )
+        self.show_diagnostics_dock_action.toggled.connect(
+            self.diagnostics_dock.setVisible
+        )
+        view_menu.addAction(self.show_diagnostics_dock_action)
+
+        self.show_module_controls_dock_action = QtWidgets.QAction(
+            "Module Controls", self
+        )
+        self.show_module_controls_dock_action.setCheckable(True)
+        self.show_module_controls_dock_action.setChecked(
+            self.module_controls_dock.isVisible()
+        )
+        self.show_module_controls_dock_action.setShortcut("Alt+3")
+        self.show_module_controls_dock_action.setStatusTip(
+            "Show or hide the module parameter controls dock"
+        )
+        self.show_module_controls_dock_action.toggled.connect(
+            self.module_controls_dock.setVisible
+        )
+        view_menu.addAction(self.show_module_controls_dock_action)
+
+        view_menu.addSeparator()
+
+        self.enable_diagnostics_logging_action = QtWidgets.QAction(
+            "Enable Diagnostics Logging", self
+        )
+        self.enable_diagnostics_logging_action.setCheckable(True)
+        self.enable_diagnostics_logging_action.setChecked(
+            self.app_core.diagnostics_enabled
+        )
+        self.enable_diagnostics_logging_action.setStatusTip(
+            "Toggle verbose diagnostics logging for troubleshooting"
+        )
+        self.enable_diagnostics_logging_action.toggled.connect(
+            self._set_diagnostics_logging
+        )
+        view_menu.addAction(self.enable_diagnostics_logging_action)
+
+        ensure_menu(("Modules",))
 
         for module in self.app_core.get_modules(ModuleStage.PREPROCESSING):
             for entry in module.menu_entries():
-                menu = ensure_menu(entry.path)
+                path = entry.path
+                if not path or path[0] != "Modules":
+                    path = ("Modules", *path)
+                menu = ensure_menu(path)
                 action = QtWidgets.QAction(entry.text, self)
+                action.setObjectName(
+                    f"moduleAction_{module.metadata.identifier}_{'_'.join(entry.path)}"
+                )
                 if entry.shortcut:
                     action.setShortcut(entry.shortcut)
+                    action.setShortcutVisibleInContextMenu(True)
                 description = entry.description or module.metadata.description
                 if description:
                     action.setStatusTip(description)
                 action.triggered.connect(
-                    lambda _, mod=module: self._activate_module(mod)
+                    partial(self._on_module_action_triggered, module)
                 )
                 menu.addAction(action)
+                key = (module.metadata.identifier, entry.text, entry.path)
+                self._module_action_lookup[key] = action
+
+        help_menu = ensure_menu(("Help",))
+
+        self.view_documentation_action = QtWidgets.QAction(
+            "View &Documentation", self
+        )
+        self.view_documentation_action.setShortcut(
+            QtGui.QKeySequence.HelpContents
+        )
+        self.view_documentation_action.setStatusTip(
+            "Open the user documentation for Yam Image Processor"
+        )
+        self.view_documentation_action.triggered.connect(self.show_documentation)
+        help_menu.addAction(self.view_documentation_action)
+
+        self.about_action = QtWidgets.QAction("&About", self)
+        self.about_action.setStatusTip("Show application information")
+        self.about_action.triggered.connect(
+            lambda: QtWidgets.QMessageBox.information(
+                self,
+                "About",
+                "Yam Image Processor Pre-Processing module",
+            )
+        )
+        help_menu.addAction(self.about_action)
+
+        self.update_undo_redo_actions()
 
     def _activate_module(self, module: ModuleBase) -> None:
         try:
             module.activate(self)
+            self.moduleActivated.emit(module.metadata.identifier)
         except NotImplementedError:
             logging.warning(
                 "Module %s does not implement an activation handler",
@@ -759,6 +938,73 @@ class MainWindow(QtWidgets.QMainWindow):
         self.thread_controller.task_finished.connect(self._on_task_finished)
         self.thread_controller.task_canceled.connect(self._on_task_canceled)
         self.thread_controller.task_failed.connect(self._on_task_failed)
+
+    def _on_pipeline_dock_visibility_changed(self, visible: bool) -> None:
+        if hasattr(self, "show_pipeline_dock_action"):
+            self.show_pipeline_dock_action.blockSignals(True)
+            self.show_pipeline_dock_action.setChecked(visible)
+            self.show_pipeline_dock_action.blockSignals(False)
+        self.pipelineDockVisibilityChanged.emit(visible)
+
+    def _on_module_controls_dock_visibility_changed(self, visible: bool) -> None:
+        if hasattr(self, "show_module_controls_dock_action"):
+            self.show_module_controls_dock_action.blockSignals(True)
+            self.show_module_controls_dock_action.setChecked(visible)
+            self.show_module_controls_dock_action.blockSignals(False)
+        self.moduleControlsDockVisibilityChanged.emit(visible)
+
+    def _on_diagnostics_dock_visibility_changed(self, visible: bool) -> None:
+        if hasattr(self, "show_diagnostics_dock_action"):
+            self.show_diagnostics_dock_action.blockSignals(True)
+            self.show_diagnostics_dock_action.setChecked(visible)
+            self.show_diagnostics_dock_action.blockSignals(False)
+        self.diagnosticsDockVisibilityChanged.emit(visible)
+
+    def _set_diagnostics_logging(self, enabled: bool) -> None:
+        self.app_core.set_diagnostics_enabled(enabled)
+        message = (
+            "Diagnostics logging enabled."
+            if enabled
+            else "Diagnostics logging disabled."
+        )
+        self._append_diagnostic_message(message)
+        self.statusBar().showMessage(message, 3000)
+        self.diagnosticsLoggingToggled.emit(enabled)
+
+    def _on_module_action_triggered(self, module: ModuleBase) -> None:
+        self._activate_module(module)
+
+    def _show_module_context_menu(self, position: QtCore.QPoint) -> None:
+        if not self._module_action_lookup:
+            return
+        menu = QtWidgets.QMenu(self.pipeline_overview_list)
+        actions = sorted(
+            self._module_action_lookup.values(), key=lambda action: action.text().lower()
+        )
+        for action in actions:
+            menu.addAction(action)
+        menu.exec_(self.pipeline_overview_list.mapToGlobal(position))
+
+    def show_documentation(self) -> None:
+        docs_root = Path(__file__).resolve().parents[1] / "docs"
+        candidates = [
+            docs_root / "USER_GUIDE.md",
+            docs_root / "README.md",
+            Path(__file__).resolve().parents[1] / "README.md",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                url = QtCore.QUrl.fromLocalFile(str(candidate))
+                QtGui.QDesktopServices.openUrl(url)
+                self.statusBar().showMessage(
+                    f"Opened documentation: {candidate.name}", 3000
+                )
+                return
+        QtWidgets.QMessageBox.information(
+            self,
+            "Documentation",
+            "Documentation files are not available in this build.",
+        )
 
     def _append_diagnostic_message(self, message: str) -> None:
         if not hasattr(self, "diagnostics_log") or self.diagnostics_log is None:
