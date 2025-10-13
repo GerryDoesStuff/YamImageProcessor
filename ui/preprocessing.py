@@ -15,6 +15,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from core.app_core import AppCore
 from core.preprocessing import Config, Loader
 from core.thread_controller import OperationCancelled, ThreadController
+from plugins.module_base import ModuleBase, ModuleStage
 from processing.pipeline_manager import PipelineManager
 from processing.preprocessing_pipeline import (
     PreprocessingPipeline,
@@ -498,7 +499,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def build_menu(self):
         menubar = self.menuBar()
-        file_menu = menubar.addMenu("File")
+        menubar.clear()
+
+        menu_cache: Dict[Tuple[str, ...], QtWidgets.QMenu] = {}
+
+        def ensure_menu(path: Tuple[str, ...]) -> QtWidgets.QMenu:
+            if path in menu_cache:
+                return menu_cache[path]
+            if not path:
+                raise ValueError("Menu path cannot be empty")
+            if len(path) == 1:
+                menu = menubar.addMenu(path[0])
+            else:
+                parent = ensure_menu(path[:-1])
+                menu = parent.addMenu(path[-1])
+            menu_cache[path] = menu
+            return menu
+
+        file_menu = ensure_menu(("File",))
 
         load_action = QtWidgets.QAction("Load Image", self)
         load_action.triggered.connect(self.load_image)
@@ -520,7 +538,7 @@ class MainWindow(QtWidgets.QMainWindow):
         exp_action.triggered.connect(self.export_pipeline)
         file_menu.addAction(exp_action)
 
-        edit_menu = menubar.addMenu("Edit")
+        edit_menu = ensure_menu(("Edit",))
         self.undo_action = QtWidgets.QAction("Undo", self)
         self.undo_action.triggered.connect(self.undo)
         self.undo_action.setEnabled(False)
@@ -530,6 +548,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self.redo_action.triggered.connect(self.redo)
         self.redo_action.setEnabled(False)
         edit_menu.addAction(self.redo_action)
+
+        reset_action = QtWidgets.QAction("Reset All", self)
+        reset_action.triggered.connect(self.reset_all)
+        edit_menu.addAction(reset_action)
+
+        for module in self.app_core.get_modules(ModuleStage.PREPROCESSING):
+            for entry in module.menu_entries():
+                menu = ensure_menu(entry.path)
+                action = QtWidgets.QAction(entry.text, self)
+                if entry.shortcut:
+                    action.setShortcut(entry.shortcut)
+                description = entry.description or module.metadata.description
+                if description:
+                    action.setStatusTip(description)
+                action.triggered.connect(
+                    lambda _, mod=module: self._activate_module(mod)
+                )
+                menu.addAction(action)
+
+    def _activate_module(self, module: ModuleBase) -> None:
+        try:
+            module.activate(self)
+        except NotImplementedError:
+            logging.warning(
+                "Module %s does not implement an activation handler",
+                module.metadata.identifier,
+            )
+            self.statusBar().showMessage(
+                f"{module.metadata.title} is not available for activation.", 2000
+            )
+        except Exception as exc:  # pragma: no cover - defensive UI guard
+            logging.exception("Module activation failed: %%s", module.metadata.identifier)
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Module Error",
+                f"{module.metadata.title} failed to run.\n{exc}",
+            )
+            self.statusBar().showMessage("Error running module action", 4000)
 
     def _register_thread_signals(self) -> None:
         self._current_task_description: str = ""
@@ -617,44 +673,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_preview = self.committed_image.copy()
         self.preview_display.set_image(self.current_preview)
         self.update_undo_redo_actions()
-
-        reset_action = QtWidgets.QAction("Reset All", self)
-        reset_action.triggered.connect(self.reset_all)
-        edit_menu.addAction(reset_action)
-
-        pre_menu = menubar.addMenu("Pre-Processing")
-
-        toggle_gray = QtWidgets.QAction("Toggle Greyscale", self)
-        toggle_gray.triggered.connect(self.toggle_grayscale)
-        pre_menu.addAction(toggle_gray)
-
-        select_channel = QtWidgets.QAction("Select Color Channel", self)
-        select_channel.triggered.connect(self.show_select_channel_dialog)
-        pre_menu.addAction(select_channel)
-
-        bc_action = QtWidgets.QAction("Brightness / Contrast", self)
-        bc_action.triggered.connect(self.show_brightness_contrast_dialog)
-        pre_menu.addAction(bc_action)
-
-        gamma_action = QtWidgets.QAction("Gamma Correction", self)
-        gamma_action.triggered.connect(self.show_gamma_dialog)
-        pre_menu.addAction(gamma_action)
-
-        norm_action = QtWidgets.QAction("Intensity Normalization", self)
-        norm_action.triggered.connect(self.show_normalize_dialog)
-        pre_menu.addAction(norm_action)
-
-        noise_action = QtWidgets.QAction("Noise Reduction", self)
-        noise_action.triggered.connect(self.show_noise_reduction_dialog)
-        pre_menu.addAction(noise_action)
-
-        sharpen_action = QtWidgets.QAction("Sharpen", self)
-        sharpen_action.triggered.connect(self.show_sharpen_dialog)
-        pre_menu.addAction(sharpen_action)
-
-        crop_action = QtWidgets.QAction("Crop", self)
-        crop_action.triggered.connect(self.show_crop_dialog)
-        pre_menu.addAction(crop_action)
 
     def reset_all(self):
         backup = None if self.committed_image is None else self.committed_image.copy()
