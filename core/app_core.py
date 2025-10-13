@@ -10,6 +10,8 @@ from yam_processor.core.module_loader import ModuleLoader, ModuleRegistry
 from yam_processor.core.settings_manager import SettingsManager
 from yam_processor.core.threading import ThreadController
 
+from .logging import init_logging
+
 
 @dataclass
 class AppConfiguration:
@@ -18,6 +20,9 @@ class AppConfiguration:
     organization: str = "MicroscopicApp"
     application: str = "ImageProcessor"
     log_level: int = logging.INFO
+    diagnostics_enabled: bool = False
+    log_directory: Path = Path("logs")
+    log_filename: str = "application.log"
     plugin_packages: Sequence[str] = field(default_factory=lambda: ["plugins"])
     module_paths: Sequence[Path | str] = field(default_factory=list)
     max_workers: Optional[int] = None
@@ -29,10 +34,12 @@ class AppCore:
     def __init__(self, config: Optional[AppConfiguration] = None) -> None:
         self.config = config or AppConfiguration()
         self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(self.config.log_level)
         self.settings_manager: Optional[SettingsManager] = None
         self.thread_controller: Optional[ThreadController] = None
         self.module_registry: ModuleRegistry = ModuleRegistry()
         self.plugins: List[object] = []
+        self._log_handler: Optional[logging.Handler] = None
         self._bootstrapped = False
 
     # ------------------------------------------------------------------
@@ -88,18 +95,26 @@ class AppCore:
     # ------------------------------------------------------------------
     # Internal helpers
     def _configure_logging(self) -> None:
-        if not logging.getLogger().handlers:
-            logging.basicConfig(
-                level=self.config.log_level,
-                format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-            )
-        else:
-            logging.getLogger().setLevel(self.config.log_level)
+        self._log_handler = init_logging(
+            diagnostics_enabled=self.config.diagnostics_enabled,
+            level=self.config.log_level,
+            log_directory=self.config.log_directory,
+            log_filename=self.config.log_filename,
+        )
+        self.logger.setLevel(
+            logging.DEBUG if self.config.diagnostics_enabled else self.config.log_level
+        )
 
     def _init_settings(self) -> None:
         self.settings_manager = SettingsManager(
             self.config.organization,
             self.config.application,
+        )
+        stored_diagnostics = self.settings_manager.get(
+            "diagnostics/enabled", self.config.diagnostics_enabled
+        )
+        self.set_diagnostics_enabled(
+            self._coerce_bool(stored_diagnostics), persist=False
         )
         self.logger.debug(
             "Settings manager initialised",
@@ -146,6 +161,46 @@ class AppCore:
             "Plugin discovery complete",
             extra={"component": "AppCore", "count": len(self.plugins)},
         )
+
+    # ------------------------------------------------------------------
+    # Diagnostics helpers
+    @property
+    def diagnostics_enabled(self) -> bool:
+        return self.config.diagnostics_enabled
+
+    @property
+    def log_handler(self) -> Optional[logging.Handler]:
+        return self._log_handler
+
+    def set_diagnostics_enabled(self, enabled: bool, *, persist: bool = True) -> None:
+        enabled = bool(enabled)
+        self.config.diagnostics_enabled = enabled
+        self._log_handler = init_logging(
+            diagnostics_enabled=enabled,
+            level=self.config.log_level,
+            log_directory=self.config.log_directory,
+            log_filename=self.config.log_filename,
+        )
+        self.logger.setLevel(logging.DEBUG if enabled else self.config.log_level)
+        if persist and self.settings_manager is not None:
+            self.settings_manager.set("diagnostics/enabled", enabled)
+
+    def set_log_level(self, level: int) -> None:
+        self.config.log_level = level
+        self._log_handler = init_logging(
+            diagnostics_enabled=self.config.diagnostics_enabled,
+            level=level,
+            log_directory=self.config.log_directory,
+            log_filename=self.config.log_filename,
+        )
+        if not self.config.diagnostics_enabled:
+            self.logger.setLevel(level)
+
+    @staticmethod
+    def _coerce_bool(value: object) -> bool:
+        if isinstance(value, str):
+            return value.lower() in {"1", "true", "yes", "on"}
+        return bool(value)
 
 
 __all__ = ["AppConfiguration", "AppCore"]
