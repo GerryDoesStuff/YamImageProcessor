@@ -9,6 +9,7 @@ from PyQt5 import QtCore, QtWidgets
 from core.app_core import AppConfiguration, AppCore
 from core.preprocessing import Config
 from ui.preprocessing import MainWindow
+from ui.theme import apply_application_theme
 
 
 def main(app_core: Optional[AppCore] = None) -> int:
@@ -23,6 +24,7 @@ def main(app_core: Optional[AppCore] = None) -> int:
 
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
     app = QtWidgets.QApplication(sys.argv)
+    apply_application_theme(app)
     window = MainWindow(app_core)
     window.show()
     exit_code = app.exec_()
