@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -13,6 +14,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from core.app_core import AppCore
 from core.preprocessing import Config, Loader
+from core.thread_controller import OperationCancelled, ThreadController
 from processing.pipeline_manager import PipelineManager
 from processing.preprocessing_pipeline import (
     PreprocessingPipeline,
@@ -404,6 +406,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.app_core.get_preprocessing_pipeline_manager()
         )
         self.pipeline_manager.reset()
+        if self.app_core.thread_controller is None:
+            self.app_core.thread_controller = ThreadController(parent=self)
+        self.thread_controller: ThreadController = self.app_core.thread_controller
+        self._progress_dialog: Optional[QtWidgets.QProgressDialog] = None
+        self._register_thread_signals()
 
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
@@ -465,8 +472,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.committed_image = snapshot.image.copy()
         self.rebuild_pipeline()
         if self.base_image is not None:
-            self.current_preview = self.pipeline.apply(self.base_image)
-            self.preview_display.set_image(self.current_preview)
+            self._apply_pipeline_async(
+                description="Updating preview",
+                on_finished=self._update_preview_from_result,
+            )
         self.update_undo_redo_actions()
 
     def redo(self):
@@ -477,8 +486,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.committed_image = snapshot.image.copy()
         self.rebuild_pipeline()
         if self.base_image is not None:
-            self.current_preview = self.pipeline.apply(self.base_image)
-            self.preview_display.set_image(self.current_preview)
+            self._apply_pipeline_async(
+                description="Updating preview",
+                on_finished=self._update_preview_from_result,
+            )
         self.update_undo_redo_actions()
 
     def update_undo_redo_actions(self):
@@ -519,6 +530,93 @@ class MainWindow(QtWidgets.QMainWindow):
         self.redo_action.triggered.connect(self.redo)
         self.redo_action.setEnabled(False)
         edit_menu.addAction(self.redo_action)
+
+    def _register_thread_signals(self) -> None:
+        self._current_task_description: str = ""
+        self.thread_controller.task_started.connect(self._on_task_started)
+        self.thread_controller.task_progress.connect(self._on_task_progress)
+        self.thread_controller.task_finished.connect(self._on_task_finished)
+        self.thread_controller.task_canceled.connect(self._on_task_canceled)
+        self.thread_controller.task_failed.connect(self._on_task_failed)
+
+    @QtCore.pyqtSlot(str)
+    def _on_task_started(self, description: str) -> None:
+        self._current_task_description = description or "Processing"
+        self.statusBar().showMessage(self._current_task_description)
+
+    @QtCore.pyqtSlot(int)
+    def _on_task_progress(self, value: int) -> None:
+        if self._progress_dialog is not None:
+            self._progress_dialog.setValue(value)
+
+    @QtCore.pyqtSlot(object)
+    def _on_task_finished(self, _result: object) -> None:
+        if self._progress_dialog is not None:
+            self._progress_dialog.reset()
+            self._progress_dialog = None
+        self.statusBar().showMessage("Ready", 1500)
+
+    @QtCore.pyqtSlot()
+    def _on_task_canceled(self) -> None:
+        if self._progress_dialog is not None:
+            self._progress_dialog.reset()
+            self._progress_dialog = None
+        self.statusBar().showMessage("Operation canceled", 2000)
+
+    @QtCore.pyqtSlot(Exception, str)
+    def _on_task_failed(self, error: Exception, stack: str) -> None:
+        if self._progress_dialog is not None:
+            self._progress_dialog.reset()
+            self._progress_dialog = None
+        logging.error("Pipeline execution failed: %s\n%s", error, stack)
+        QtWidgets.QMessageBox.critical(
+            self,
+            "Processing Error",
+            f"{self._current_task_description} failed:\n{error}",
+        )
+        self.statusBar().showMessage("Error during processing", 4000)
+
+    def _apply_pipeline_async(
+        self,
+        *,
+        pipeline: Optional[PipelineManager] = None,
+        image: Optional[np.ndarray] = None,
+        description: str = "Processing image",
+        on_finished: Optional[Callable[[np.ndarray], None]] = None,
+        on_canceled: Optional[Callable[[], None]] = None,
+    ) -> None:
+        if pipeline is None:
+            pipeline = self.pipeline
+        if image is None:
+            if self.base_image is None:
+                return
+            image = self.base_image
+
+        def _handle_finished(result: np.ndarray) -> None:
+            if on_finished is not None:
+                on_finished(result)
+
+        def _handle_canceled() -> None:
+            if on_canceled is not None:
+                on_canceled()
+
+        self.thread_controller.run_pipeline(
+            pipeline,
+            image,
+            description=description,
+            on_finished=_handle_finished,
+            on_canceled=_handle_canceled,
+        )
+
+    def _update_preview_from_result(self, image: np.ndarray) -> None:
+        self.current_preview = image.copy()
+        self.preview_display.set_image(self.current_preview)
+
+    def _update_committed_from_result(self, image: np.ndarray) -> None:
+        self.committed_image = image.copy()
+        self.current_preview = self.committed_image.copy()
+        self.preview_display.set_image(self.current_preview)
+        self.update_undo_redo_actions()
 
         reset_action = QtWidgets.QAction("Reset All", self)
         reset_action.triggered.connect(self.reset_all)
@@ -566,11 +664,15 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.rebuild_pipeline()
         if self.base_image is not None:
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
-            self.statusBar().showMessage("Reset all processing to defaults.")
+            self._apply_pipeline_async(
+                description="Resetting pipeline",
+                on_finished=self._on_reset_completed,
+            )
         self.update_undo_redo_actions()
+
+    def _on_reset_completed(self, image: np.ndarray) -> None:
+        self._update_committed_from_result(image)
+        self.statusBar().showMessage("Reset all processing to defaults.", 3000)
 
     def mass_preprocess(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder for Mass Pre-Process")
@@ -580,24 +682,76 @@ class MainWindow(QtWidgets.QMainWindow):
         base_folder = os.path.basename(folder)
         output_folder = os.path.join(parent_dir, base_folder + "_pp")
         os.makedirs(output_folder, exist_ok=True)
-        count = 0
-        for file in os.listdir(folder):
-            fullpath = os.path.join(folder, file)
-            if os.path.isfile(fullpath) and os.path.splitext(file)[1].lower() in Config.SUPPORTED_FORMATS:
+        files = [
+            os.path.join(folder, file)
+            for file in os.listdir(folder)
+            if os.path.isfile(os.path.join(folder, file))
+            and os.path.splitext(file)[1].lower() in Config.SUPPORTED_FORMATS
+        ]
+        if not files:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Mass Pre-Process",
+                "No supported images were found in the selected folder.",
+            )
+            return
+
+        self._progress_dialog = QtWidgets.QProgressDialog(
+            "Processing images…",
+            "Cancel",
+            0,
+            100,
+            self,
+        )
+        self._progress_dialog.setWindowModality(QtCore.Qt.WindowModal)
+        self._progress_dialog.setMinimumDuration(0)
+        self._progress_dialog.setValue(0)
+        self._progress_dialog.canceled.connect(self.thread_controller.cancel)
+
+        pipeline_snapshot = build_preprocessing_pipeline(
+            self.app_core, self.pipeline_manager.clone()
+        )
+
+        def _task(cancel_event: threading.Event, progress: Callable[[int], None]) -> int:
+            processed_count = 0
+            total = len(files)
+            for index, path in enumerate(files, start=1):
+                if cancel_event.is_set():
+                    raise OperationCancelled()
+                filename = os.path.basename(path)
                 try:
-                    image = Loader.load_image(fullpath)
-                    processed = self.pipeline.apply(image)
-                    name, ext = os.path.splitext(file)
+                    image = Loader.load_image(path)
+                    result = pipeline_snapshot.apply(image)
+                    name, ext = os.path.splitext(filename)
                     new_filename = name + "_pp" + ext
                     outpath = os.path.join(output_folder, new_filename)
-                    cv2.imwrite(outpath, processed)
-                    count += 1
+                    cv2.imwrite(outpath, result)
+                    processed_count += 1
                 except Exception as exc:  # pragma: no cover - user feedback
-                    logging.error("Failed to process %s: %s", file, exc)
-        QtWidgets.QMessageBox.information(
-            self,
-            "Mass Pre-Process",
-            f"Processed {count} images.\nOutput folder: {output_folder}",
+                    logging.error("Failed to process %s: %s", filename, exc)
+                finally:
+                    progress(int(index * 100 / total))
+            return processed_count
+
+        def _finished(count: int) -> None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Mass Pre-Process",
+                f"Processed {count} images.\nOutput folder: {output_folder}",
+            )
+
+        def _canceled() -> None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Mass Pre-Process",
+                "Mass pre-processing was canceled.",
+            )
+
+        self.thread_controller.run_task(
+            _task,
+            description="Mass pre-processing images",
+            on_finished=_finished,
+            on_canceled=_canceled,
         )
 
     def export_pipeline(self):
@@ -626,10 +780,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.app_core.load_preprocessing_pipeline(data)
                 self.rebuild_pipeline()
                 if self.base_image is not None:
-                    self.committed_image = self.pipeline.apply(self.base_image)
-                    self.current_preview = self.committed_image.copy()
-                    self.preview_display.set_image(self.current_preview)
-                QtWidgets.QMessageBox.information(self, "Pipeline Import", "Pipeline settings imported and applied.")
+                    def _applied(image: np.ndarray) -> None:
+                        self._update_committed_from_result(image)
+                        QtWidgets.QMessageBox.information(
+                            self,
+                            "Pipeline Import",
+                            "Pipeline settings imported and applied.",
+                        )
+
+                    self._apply_pipeline_async(
+                        description="Applying imported pipeline",
+                        on_finished=_applied,
+                    )
+                else:
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        "Pipeline Import",
+                        "Pipeline settings imported.",
+                    )
                 self.update_undo_redo_actions()
             except Exception as exc:  # pragma: no cover - user feedback
                 QtWidgets.QMessageBox.critical(self, "Error", f"Failed to import pipeline: {exc}")
@@ -650,10 +818,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.base_image = image.copy()
         self.committed_image = image.copy()
         self.pipeline = build_preprocessing_pipeline(self.app_core, self.pipeline_manager)
-        processed = self.pipeline.apply(image)
-        self.current_preview = processed.copy()
         self.original_display.set_image(self.original_image)
-        self.preview_display.set_image(processed)
+        self.preview_display.set_image(self.base_image)
+        self._apply_pipeline_async(
+            image=self.base_image,
+            description="Generating preview",
+            on_finished=self._update_preview_from_result,
+        )
         self.pipeline_manager.clear_history()
         self.update_undo_redo_actions()
         self.statusBar().showMessage(f"Loaded image: {filename}")
@@ -671,9 +842,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_preview(self):
         if self.base_image is not None:
-            processed = self.pipeline.apply(self.base_image)
-            self.current_preview = processed.copy()
-            self.preview_display.set_image(processed)
+            self._apply_pipeline_async(
+                description="Updating preview",
+                on_finished=self._update_preview_from_result,
+            )
 
     def toggle_grayscale(self):
         backup = None if self.committed_image is None else self.committed_image.copy()
@@ -681,9 +853,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pipeline_manager.toggle_step("Grayscale")
         self.rebuild_pipeline()
         if self.base_image is not None:
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            self._apply_pipeline_async(
+                description="Applying grayscale step",
+                on_finished=self._update_committed_from_result,
+            )
         self.update_undo_redo_actions()
 
     def preview_update(self, func_name: str, temp_params: Dict[str, Any]):
@@ -699,9 +872,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if func_name == "Crop":
             step.params["apply_crop"] = False
         temp_pipeline = build_preprocessing_pipeline(self.app_core, temp_manager)
-        new_preview = temp_pipeline.apply(self.base_image)
-        self.current_preview = new_preview.copy()
-        self.preview_display.set_image(new_preview)
+        self._apply_pipeline_async(
+            pipeline=temp_pipeline,
+            description="Updating preview",
+            on_finished=self._update_preview_from_result,
+        )
 
     def show_brightness_contrast_dialog(self):
         backup = None if self.committed_image is None else self.committed_image.copy()
@@ -723,9 +898,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 "BrightnessContrast", {"alpha": new_alpha, "beta": new_beta}
             )
             self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                self._apply_pipeline_async(
+                    description="Applying brightness/contrast",
+                    on_finished=self._update_committed_from_result,
+                )
             self.update_undo_redo_actions()
         else:
             if backup is not None:
@@ -745,9 +922,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.pipeline_manager.set_step_enabled("Gamma", True)
             self.pipeline_manager.update_step_params("Gamma", {"gamma": new_gamma})
             self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                self._apply_pipeline_async(
+                    description="Applying gamma correction",
+                    on_finished=self._update_committed_from_result,
+                )
             self.update_undo_redo_actions()
         else:
             if backup is not None:
@@ -773,9 +952,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 "IntensityNormalization", {"alpha": new_alpha, "beta": new_beta}
             )
             self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                self._apply_pipeline_async(
+                    description="Applying normalization",
+                    on_finished=self._update_committed_from_result,
+                )
             self.update_undo_redo_actions()
         else:
             if backup is not None:
@@ -801,9 +982,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 "NoiseReduction", {"method": new_method, "ksize": new_ksize}
             )
             self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                self._apply_pipeline_async(
+                    description="Applying noise reduction",
+                    on_finished=self._update_committed_from_result,
+                )
             self.update_undo_redo_actions()
         else:
             if backup is not None:
@@ -825,9 +1008,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Sharpen", {"strength": new_strength}
             )
             self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                self._apply_pipeline_async(
+                    description="Applying sharpening",
+                    on_finished=self._update_committed_from_result,
+                )
             self.update_undo_redo_actions()
         else:
             if backup is not None:
@@ -849,9 +1034,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 "SelectChannel", {"channel": new_channel}
             )
             self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                self._apply_pipeline_async(
+                    description="Applying channel selection",
+                    on_finished=self._update_committed_from_result,
+                )
             self.update_undo_redo_actions()
         else:
             if backup is not None:
@@ -888,9 +1075,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 },
             )
             self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                self._apply_pipeline_async(
+                    description="Applying crop",
+                    on_finished=self._update_committed_from_result,
+                )
             self.update_undo_redo_actions()
         else:
             if backup is not None:

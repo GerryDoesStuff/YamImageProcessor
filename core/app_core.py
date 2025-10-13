@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from yam_processor.core.module_loader import ModuleLoader, ModuleRegistry
-from yam_processor.core.threading import ThreadController
+
+from .thread_controller import ThreadController
 
 from .settings import SettingsManager
 
