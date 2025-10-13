@@ -1,12 +1,15 @@
 """Lightweight application bootstrap exposing shared services."""
 from __future__ import annotations
 
+import importlib
 import logging
+import pkgutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from types import ModuleType
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
-from yam_processor.core.module_loader import ModuleLoader, ModuleRegistry
+from plugins.module_base import ModuleBase, ModuleStage
 
 from .thread_controller import ThreadController
 
@@ -26,7 +29,7 @@ class AppConfiguration:
     diagnostics_enabled: bool = False
     log_directory: Path = Path("logs")
     log_filename: str = "application.log"
-    plugin_packages: Sequence[str] = field(default_factory=lambda: ["plugins"])
+    plugin_packages: Sequence[str] = field(default_factory=lambda: ["modules"])
     module_paths: Sequence[Path | str] = field(default_factory=list)
     max_workers: Optional[int] = None
 
@@ -40,7 +43,9 @@ class AppCore:
         self.logger.setLevel(self.config.log_level)
         self.settings_manager: Optional[SettingsManager] = None
         self.thread_controller: Optional[ThreadController] = None
-        self.module_registry: ModuleRegistry = ModuleRegistry()
+        self._module_catalog: Dict[ModuleStage, Dict[str, ModuleBase]] = {
+            stage: {} for stage in ModuleStage
+        }
         self.plugins: List[object] = []
         self._log_handler: Optional[logging.Handler] = None
         self._bootstrapped = False
@@ -109,61 +114,10 @@ class AppCore:
     # Pipeline helpers
     def get_preprocessing_pipeline_manager(self) -> PipelineManager:
         if self._preprocessing_manager is None:
-            from core.preprocessing import Preprocessor
-
-            templates = {
-                "Grayscale": PipelineStep(
-                    "Grayscale", Preprocessor.to_grayscale, enabled=False
-                ),
-                "BrightnessContrast": PipelineStep(
-                    "BrightnessContrast",
-                    Preprocessor.adjust_contrast_brightness,
-                    enabled=False,
-                    params={"alpha": 1.0, "beta": 0},
-                ),
-                "Gamma": PipelineStep(
-                    "Gamma",
-                    Preprocessor.adjust_gamma,
-                    enabled=False,
-                    params={"gamma": 1.0},
-                ),
-                "IntensityNormalization": PipelineStep(
-                    "IntensityNormalization",
-                    Preprocessor.normalize_intensity,
-                    enabled=False,
-                    params={"alpha": 0, "beta": 255},
-                ),
-                "NoiseReduction": PipelineStep(
-                    "NoiseReduction",
-                    Preprocessor.noise_reduction,
-                    enabled=False,
-                    params={"method": "Gaussian", "ksize": 5},
-                ),
-                "Sharpen": PipelineStep(
-                    "Sharpen",
-                    Preprocessor.sharpen,
-                    enabled=False,
-                    params={"strength": 1.0},
-                ),
-                "SelectChannel": PipelineStep(
-                    "SelectChannel",
-                    Preprocessor.select_channel,
-                    enabled=False,
-                    params={"channel": "All"},
-                ),
-                "Crop": PipelineStep(
-                    "Crop",
-                    Preprocessor.crop_image,
-                    enabled=False,
-                    params={
-                        "x_offset": 0,
-                        "y_offset": 0,
-                        "width": 100,
-                        "height": 100,
-                        "apply_crop": False,
-                    },
-                ),
-            }
+            templates: Dict[str, PipelineStep] = {}
+            for module in self.iter_modules(ModuleStage.PREPROCESSING):
+                step = module.create_pipeline_step()
+                templates[step.name] = step
             self._preprocessing_templates = templates
             self._preprocessing_manager = PipelineManager(templates.values())
         return self._preprocessing_manager
@@ -230,38 +184,117 @@ class AppCore:
         )
 
     def _discover_plugins(self) -> None:
-        loader = ModuleLoader(
-            self.config.plugin_packages,
-            [Path(path) for path in self.config.module_paths],
-        )
-        self.plugins = []
-        for module in loader.discover():
-            register = getattr(module, "register_module", None)
-            if callable(register):
+        discovered: Dict[str, ModuleType] = {}
+        for package_name in self.config.plugin_packages:
+            try:
+                package = importlib.import_module(package_name)
+            except ImportError as exc:  # pragma: no cover - discovery failure path
+                self.logger.warning(
+                    "Failed to import plugin package",
+                    extra={
+                        "component": "AppCore",
+                        "package": package_name,
+                        "error": str(exc),
+                    },
+                )
+                continue
+
+            self._invoke_register(package)
+            discovered[package.__name__] = package
+
+            package_path = getattr(package, "__path__", None)
+            if not package_path:
+                continue
+
+            for _, name, _ in pkgutil.walk_packages(package_path, package.__name__ + "."):
+                if name in discovered:
+                    continue
                 try:
-                    register(self)
-                    self.logger.debug(
-                        "Plugin registered",
-                        extra={
-                            "component": "AppCore",
-                            "module": module.__name__,
-                        },
-                    )
-                except Exception as exc:  # pragma: no cover - defensive logging
+                    module = importlib.import_module(name)
+                except Exception as exc:  # pragma: no cover - plugin import guard
                     self.logger.warning(
-                        "Plugin registration failed",
+                        "Failed to load plugin module",
                         extra={
                             "component": "AppCore",
-                            "module": module.__name__,
+                            "module": name,
                             "error": str(exc),
                         },
                     )
                     continue
-            self.plugins.append(module)
+                self._invoke_register(module)
+                discovered[name] = module
+
+        self.plugins = list(discovered.values())
         self.logger.debug(
             "Plugin discovery complete",
             extra={"component": "AppCore", "count": len(self.plugins)},
         )
+
+    def _invoke_register(self, module: ModuleType) -> None:
+        register = getattr(module, "register_module", None)
+        if not callable(register):
+            return
+        try:
+            register(self)
+            self.logger.debug(
+                "Plugin registered",
+                extra={"component": "AppCore", "module": module.__name__},
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.warning(
+                "Plugin registration failed",
+                extra={
+                    "component": "AppCore",
+                    "module": module.__name__,
+                    "error": str(exc),
+                },
+            )
+
+    # ------------------------------------------------------------------
+    # Module management helpers
+    def register_module(self, module_cls: type[ModuleBase]) -> None:
+        """Register ``module_cls`` with the module catalogue."""
+
+        if not isinstance(module_cls, type) or not issubclass(module_cls, ModuleBase):
+            raise TypeError("Modules must be registered using ModuleBase subclasses.")
+
+        module = module_cls()
+        metadata = module.metadata
+        stage_modules = self._module_catalog.setdefault(metadata.stage, {})
+        if metadata.identifier in stage_modules:
+            self.logger.warning(
+                "Duplicate module identifier detected",
+                extra={
+                    "component": "AppCore",
+                    "identifier": metadata.identifier,
+                    "stage": metadata.stage.value,
+                },
+            )
+            return
+
+        stage_modules[metadata.identifier] = module
+        self.logger.info(
+            "Registered module",
+            extra={
+                "component": "AppCore",
+                "identifier": metadata.identifier,
+                "stage": metadata.stage.value,
+            },
+        )
+
+    def iter_modules(self, stage: ModuleStage | None = None) -> Iterator[ModuleBase]:
+        """Yield registered modules, optionally filtered by ``stage``."""
+
+        if stage is None:
+            for modules in self._module_catalog.values():
+                yield from modules.values()
+            return
+        yield from self._module_catalog.get(stage, {}).values()
+
+    def get_modules(self, stage: ModuleStage) -> Tuple[ModuleBase, ...]:
+        """Return the registered modules for ``stage``."""
+
+        return tuple(self._module_catalog.get(stage, {}).values())
 
     # ------------------------------------------------------------------
     # Diagnostics helpers
