@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from typing import Optional
 
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
 
 from core.app_core import AppConfiguration, AppCore
 from core.preprocessing import Config
@@ -21,6 +21,7 @@ def main(app_core: Optional[AppCore] = None) -> int:
 
     app_core.ensure_bootstrapped()
 
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
     app = QtWidgets.QApplication(sys.argv)
     window = MainWindow(app_core)
     window.show()
