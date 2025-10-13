@@ -8,6 +8,7 @@ from PyQt5 import QtWidgets
 
 from core.app_core import AppConfiguration, AppCore
 from core.segmentation import Config
+from core.i18n import TranslationConfig, bootstrap_translations
 from ui.segmentation import MainWindow
 from ui.theme import apply_application_theme
 
@@ -23,6 +24,13 @@ def main(app_core: Optional[AppCore] = None) -> int:
     app_core.ensure_bootstrapped()
 
     app = QtWidgets.QApplication(sys.argv)
+    translation_config = TranslationConfig(
+        directories=app_core.config.translation_directories,
+        locales=app_core.config.translation_locales,
+        file_prefix=app_core.config.translation_prefix,
+    )
+    translation_loader = bootstrap_translations(app, translation_config)
+    app.setProperty("core.translation_loader", translation_loader)
     apply_application_theme(app)
     window = MainWindow(app_core)
     window.show()

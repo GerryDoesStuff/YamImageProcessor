@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import Sequence
 
 from core.app_core import AppConfiguration, AppCore
 from core.extraction import Config
-from core.extraction_app import main
+from core.extraction_app import main as run_extraction_app
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -22,8 +23,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-if __name__ == "__main__":
-    arguments = _parse_args(sys.argv[1:])
+def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(argv) if argv is not None else sys.argv[1:]
+    arguments = _parse_args(list(argv))
     app_core = AppCore(
         AppConfiguration(
             organization=Config.SETTINGS_ORG,
@@ -34,4 +36,8 @@ if __name__ == "__main__":
     app_core.ensure_bootstrapped()
     _ = app_core.settings
     _ = app_core.autosave
-    sys.exit(main(app_core))
+    return run_extraction_app(app_core)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

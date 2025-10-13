@@ -9,7 +9,7 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_DIR="$ROOT_DIR/yam_processor"
 TS_DIR="$ROOT_DIR/translations"
-I18N_DIR="$ROOT_DIR/yam_processor/i18n"
+I18N_DIR="$ROOT_DIR/translations"
 
 mkdir -p "$TS_DIR" "$I18N_DIR"
 
