@@ -47,11 +47,13 @@ class PipelineState:
 
     steps: List[PipelineStep]
     image: Optional[np.ndarray] = None
+    cache_signature: Optional[str] = None
 
     def clone(self) -> "PipelineState":
         return PipelineState(
             [step.clone() for step in self.steps],
             None if self.image is None else self.image.copy(),
+            self.cache_signature,
         )
 
 
@@ -185,28 +187,46 @@ class PipelineManager:
     # ------------------------------------------------------------------
     # History support
     # ------------------------------------------------------------------
-    def _snapshot(self, image: Optional[np.ndarray]) -> PipelineState:
+    def _snapshot(
+        self, image: Optional[np.ndarray], cache_signature: Optional[str]
+    ) -> PipelineState:
         return PipelineState(
             [step.clone() for step in self._steps],
             None if image is None else image.copy(),
+            cache_signature,
         )
 
-    def push_state(self, *, image: Optional[np.ndarray] = None) -> None:
-        self._undo_stack.append(self._snapshot(image))
+    def push_state(
+        self,
+        *,
+        image: Optional[np.ndarray] = None,
+        cache_signature: Optional[str] = None,
+    ) -> None:
+        self._undo_stack.append(self._snapshot(image, cache_signature))
         self._redo_stack.clear()
 
-    def undo(self, *, current_image: Optional[np.ndarray] = None) -> Optional[PipelineState]:
+    def undo(
+        self,
+        *,
+        current_image: Optional[np.ndarray] = None,
+        current_cache_signature: Optional[str] = None,
+    ) -> Optional[PipelineState]:
         if not self._undo_stack:
             return None
-        self._redo_stack.append(self._snapshot(current_image))
+        self._redo_stack.append(self._snapshot(current_image, current_cache_signature))
         previous = self._undo_stack.pop()
         self._steps = [step.clone() for step in previous.steps]
         return previous.clone()
 
-    def redo(self, *, current_image: Optional[np.ndarray] = None) -> Optional[PipelineState]:
+    def redo(
+        self,
+        *,
+        current_image: Optional[np.ndarray] = None,
+        current_cache_signature: Optional[str] = None,
+    ) -> Optional[PipelineState]:
         if not self._redo_stack:
             return None
-        self._undo_stack.append(self._snapshot(current_image))
+        self._undo_stack.append(self._snapshot(current_image, current_cache_signature))
         next_state = self._redo_stack.pop()
         self._steps = [step.clone() for step in next_state.steps]
         return next_state.clone()
