@@ -19,6 +19,9 @@ except Exception:  # pragma: no cover
 DEFAULT_SETTINGS: Dict[str, Any] = {
     # Diagnostics -----------------------------------------------------------------
     "diagnostics/enabled": False,
+    # Persistence -----------------------------------------------------------------
+    "io/default_format": ".png",
+    "io/metadata_schema": "yam.image-metadata.v1",
     # Preprocessing ---------------------------------------------------------------
     "preprocess/order": "",
     "preprocess/grayscale": False,

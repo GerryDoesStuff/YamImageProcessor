@@ -13,6 +13,7 @@ from plugins.module_base import ModuleBase, ModuleStage
 
 from .thread_controller import ThreadController
 
+from .io_manager import IOManager
 from .settings import SettingsManager
 
 from .logging import init_logging
@@ -43,6 +44,7 @@ class AppCore:
         self.logger.setLevel(self.config.log_level)
         self.settings_manager: Optional[SettingsManager] = None
         self.thread_controller: Optional[ThreadController] = None
+        self._io_manager: Optional[IOManager] = None
         self._module_catalog: Dict[ModuleStage, Dict[str, ModuleBase]] = {
             stage: {} for stage in ModuleStage
         }
@@ -103,6 +105,14 @@ class AppCore:
         if self.settings_manager is None:
             raise RuntimeError("Settings manager not initialised. Call bootstrap() first.")
         return self.settings_manager
+
+    @property
+    def io_manager(self) -> IOManager:
+        """Return the shared image persistence helper."""
+
+        if self._io_manager is None:
+            raise RuntimeError("IO manager not initialised. Call bootstrap() first.")
+        return self._io_manager
 
     def ensure_bootstrapped(self) -> None:
         """Ensure :meth:`bootstrap` has been executed."""
@@ -171,6 +181,7 @@ class AppCore:
         self.set_diagnostics_enabled(
             self._coerce_bool(stored_diagnostics), persist=False
         )
+        self._io_manager = IOManager(self.settings_manager)
         self.logger.debug(
             "Settings manager initialised",
             extra={"component": "AppCore"},
