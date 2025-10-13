@@ -19,6 +19,11 @@ except Exception:  # pragma: no cover
 DEFAULT_SETTINGS: Dict[str, Any] = {
     # Diagnostics -----------------------------------------------------------------
     "diagnostics/enabled": False,
+    # Autosave --------------------------------------------------------------------
+    "autosave/enabled": True,
+    "autosave/interval_seconds": 120.0,
+    "autosave/workspace": "",
+    "autosave/backup_retention": 5,
     # Persistence -----------------------------------------------------------------
     "io/default_format": ".png",
     "io/metadata_schema": "yam.image-metadata.v1",
@@ -172,6 +177,16 @@ class _FallbackSettings:
         return None
 
 
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
 class SettingsManager:
     """High level wrapper for ``QSettings`` that supports JSON import/export."""
 
@@ -201,6 +216,23 @@ class SettingsManager:
     def set(self, key: str, value: Any) -> None:
         self._settings.setValue(key, value)
         self._settings.sync()
+
+    def get_bool(self, key: str, default: bool = False) -> bool:
+        return _coerce_bool(self.get(key, default))
+
+    def get_int(self, key: str, default: int = 0) -> int:
+        value = self.get(key, default)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return int(default)
+
+    def get_float(self, key: str, default: float = 0.0) -> float:
+        value = self.get(key, default)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
 
     def remove(self, key: str) -> None:
         self._settings.remove(key)
@@ -329,6 +361,92 @@ class SettingsManager:
             raise FileNotFoundError(path)
         payload = path.read_text(encoding="utf-8")
         self.from_json(payload, prefix=prefix, clear=clear)
+
+    def export_group(self, path: Path, *, prefix: str, indent: int = 2) -> None:
+        """Persist a subset of settings rooted at ``prefix`` to ``path``."""
+
+        snapshot = self.snapshot(prefix=prefix, strip_prefix=True)
+        serialised = json.dumps(snapshot, indent=indent, sort_keys=True)
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(serialised, encoding="utf-8")
+
+    def import_group(
+        self,
+        path: Path,
+        *,
+        prefix: str,
+        clear: bool = False,
+    ) -> None:
+        """Load settings previously stored via :meth:`export_group`."""
+
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, MutableMapping):
+            raise ValueError("Settings group files must contain an object")
+        self.apply_snapshot(payload, prefix=prefix, clear=clear)
+
+    # ------------------------------------------------------------------
+    # Autosave helpers
+    def autosave_enabled(self) -> bool:
+        return self.get_bool("autosave/enabled", True)
+
+    def set_autosave_enabled(self, enabled: bool) -> None:
+        self.set("autosave/enabled", bool(enabled))
+
+    def autosave_interval(self) -> float:
+        interval = self.get_float("autosave/interval_seconds", 120.0)
+        return max(0.0, interval)
+
+    def set_autosave_interval(self, seconds: float) -> None:
+        self.set("autosave/interval_seconds", float(seconds))
+
+    def autosave_backup_retention(self) -> int:
+        retention = self.get_int("autosave/backup_retention", 5)
+        return max(0, retention)
+
+    def set_autosave_backup_retention(self, count: int) -> None:
+        self.set("autosave/backup_retention", int(count))
+
+    def autosave_workspace(self) -> Optional[Path]:
+        value = self.get("autosave/workspace", "")
+        text = str(value).strip()
+        if not text:
+            return None
+        return Path(text).expanduser()
+
+    def set_autosave_workspace(self, path: Path | str | None) -> None:
+        if path is None:
+            self.set("autosave/workspace", "")
+            return
+        self.set("autosave/workspace", str(Path(path)))
+
+    def autosave_preferences(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.autosave_enabled(),
+            "interval_seconds": self.autosave_interval(),
+            "backup_retention": self.autosave_backup_retention(),
+            "workspace": str(self.autosave_workspace() or ""),
+        }
+
+    def update_autosave_preferences(
+        self,
+        *,
+        enabled: bool | None = None,
+        interval_seconds: float | None = None,
+        backup_retention: int | None = None,
+        workspace: Path | str | None = None,
+    ) -> None:
+        if enabled is not None:
+            self.set_autosave_enabled(enabled)
+        if interval_seconds is not None:
+            self.set_autosave_interval(interval_seconds)
+        if backup_retention is not None:
+            self.set_autosave_backup_retention(backup_retention)
+        if workspace is not None:
+            self.set_autosave_workspace(workspace)
 
     # ------------------------------------------------------------------
     @property
