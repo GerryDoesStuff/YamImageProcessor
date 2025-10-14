@@ -88,7 +88,12 @@ class AppCore:
                 "Update checks disabled by configuration",
                 extra={"component": "AppCore"},
             )
-        if self.telemetry_enabled:
+        if not self.config.developer_diagnostics:
+            self.logger.info(
+                "Telemetry disabled (developer diagnostics disabled)",
+                extra={"component": "AppCore"},
+            )
+        elif self.telemetry_enabled:
             self.configure_telemetry()
         else:
             self.logger.debug(
@@ -329,6 +334,16 @@ class AppCore:
     def configure_telemetry(self) -> None:
         """Enable telemetry emission when the user has opted in."""
 
+        if not self.config.developer_diagnostics:
+            if self.settings is not None:
+                self.settings.set(self.telemetry_setting_key, False)
+            self.telemetry_enabled = False
+            self.logger.debug(
+                "Telemetry configuration skipped (developer diagnostics disabled)",
+                extra={"component": "AppCore"},
+            )
+            return
+
         if self.settings is None:
             self.logger.debug(
                 "Telemetry configuration skipped (no settings manager)",
@@ -346,6 +361,11 @@ class AppCore:
         )
 
     def _resolve_telemetry_opt_in(self) -> bool:
+        if not self.config.developer_diagnostics:
+            if self.settings is not None:
+                self.settings.set(self.telemetry_setting_key, False)
+            return False
+
         if self.settings is None:
             return bool(self.config.telemetry_opt_in)
 
