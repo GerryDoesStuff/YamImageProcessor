@@ -35,6 +35,7 @@ from ui.theme import (
 )
 
 from yam_processor.ui.error_reporter import ErrorResolution, present_error_report
+from yam_processor.ui.diagnostics_panel import DiagnosticsPanel
 
 
 LOGGER = logging.getLogger(__name__)
@@ -657,24 +658,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self._on_pipeline_dock_visibility_changed
         )
 
-        self.diagnostics_log = QtWidgets.QPlainTextEdit()
-        self.diagnostics_log.setReadOnly(True)
-        self.diagnostics_log.setObjectName("diagnosticsLog")
-        self.diagnostics_log.setFocusPolicy(QtCore.Qt.StrongFocus)
-        self.diagnostics_log.setAccessibleName("Diagnostics log viewer")
-        self.diagnostics_log.setPlaceholderText(
-            "Diagnostics output will appear here when verbose logging is enabled."
-        )
-        self.diagnostics_log.setWhatsThis(
-            "Displays diagnostic messages and progress updates emitted during preprocessing."
-        )
-
         diagnostics_widget = SectionWidget("Diagnostics & Shortcuts")
         diagnostics_widget.setObjectName("diagnosticsSection")
         diagnostics_layout = diagnostics_widget.layout
         self.shortcut_summary = ShortcutSummaryWidget()
         diagnostics_layout.addWidget(self.shortcut_summary)
-        diagnostics_layout.addWidget(self.diagnostics_log, 1)
+        self.diagnostics_panel = DiagnosticsPanel()
+        self.diagnostics_panel.setObjectName("diagnosticsPanel")
+        self.diagnostics_panel.setAccessibleName("Diagnostics activity viewer")
+        self.diagnostics_panel.setFocusPolicy(QtCore.Qt.StrongFocus)
+        diagnostics_layout.addWidget(self.diagnostics_panel, 1)
 
         self.diagnostics_dock = ThemedDockWidget("Diagnostics Log", self)
         self.diagnostics_dock.setObjectName("diagnosticsLogDock")
@@ -693,6 +686,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.diagnostics_dock.visibilityChanged.connect(
             self._on_diagnostics_dock_visibility_changed
         )
+
+        panel_handler = self.diagnostics_panel.log_handler()
+        if self.app_core.log_handler is not None and getattr(
+            self.app_core.log_handler, "formatter", None
+        ) is not None:
+            panel_handler.setFormatter(self.app_core.log_handler.formatter)
+        else:
+            panel_handler.setFormatter(
+                logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+            )
+        self.diagnostics_panel.attach_to_logger(logging.getLogger())
+        self.diagnostics_panel.set_thread_controller(self.thread_controller)
+        self._task_counter = 0
+        self._active_task_id: Optional[str] = None
+        self._module_task_ids: Dict[str, str] = {}
+        self._register_module_health_entries()
+        self.moduleActivated.connect(self._on_module_activated)
 
         self.module_controls_container = QtWidgets.QScrollArea()
         self.module_controls_container.setWidgetResizable(True)
@@ -763,7 +773,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._diagnostics_focus_shortcut.setObjectName("diagnosticsFocusShortcut")
         self._diagnostics_focus_shortcut.activated.connect(
-            lambda: self.diagnostics_log.setFocus(QtCore.Qt.ShortcutFocusReason)
+            self._focus_diagnostics_panel
         )
 
         self._module_controls_focus_shortcut = QtWidgets.QShortcut(
@@ -1251,7 +1261,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         mapping = (
             ("Focus pipeline overview", "_pipeline_focus_shortcut"),
-            ("Focus diagnostics log", "_diagnostics_focus_shortcut"),
+            ("Focus diagnostics panel", "_diagnostics_focus_shortcut"),
             ("Focus module controls", "_module_controls_focus_shortcut"),
             ("Undo", "undo_shortcut"),
             ("Redo", "redo_shortcut"),
@@ -1303,21 +1313,26 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
 
     def _activate_module(self, module: ModuleBase) -> None:
+        identifier = module.metadata.identifier
+        self._update_module_status(identifier, self.tr("Activating"), progress=0.0)
         try:
             module.activate(self)
-            self.moduleActivated.emit(module.metadata.identifier)
+            LOGGER.info("Module %s activated", identifier)
+            self.moduleActivated.emit(identifier)
         except NotImplementedError:
+            self._update_module_status(identifier, self.tr("Unavailable"), progress=0.0)
             logging.warning(
                 "Module %s does not implement an activation handler",
-                module.metadata.identifier,
+                identifier,
             )
             self.statusBar().showMessage(
                 f"{module.metadata.title} is not available for activation.", 2000
             )
         except Exception as exc:  # pragma: no cover - defensive UI guard
+            self._update_module_status(identifier, self.tr("Error"), progress=0.0)
             context = {
                 "operation": "activate_module",
-                "module": module.metadata.identifier,
+                "module": identifier,
                 "title": module.metadata.title,
             }
             self._report_error(
@@ -1341,6 +1356,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.thread_controller.task_canceled.connect(self._on_task_canceled)
         self.thread_controller.task_failed.connect(self._on_task_failed)
 
+    def diagnostics_panel_widget(self) -> Optional[DiagnosticsPanel]:
+        return getattr(self, "diagnostics_panel", None)
+
+    def _register_module_health_entries(self) -> None:
+        if not hasattr(self, "diagnostics_panel") or self.diagnostics_panel is None:
+            return
+        self._module_task_ids.clear()
+        for module in self.app_core.get_modules(ModuleStage.PREPROCESSING):
+            identifier = module.metadata.identifier
+            task_id = f"module::{identifier}"
+            self._module_task_ids[identifier] = task_id
+            self.diagnostics_panel.register_task(task_id, module.metadata.title)
+            self._update_module_status(identifier, self.tr("Ready"), progress=1.0)
+
+    def _update_module_status(
+        self, identifier: str, status: str, *, progress: Optional[float] = None
+    ) -> None:
+        if not hasattr(self, "diagnostics_panel") or self.diagnostics_panel is None:
+            return
+        task_id = self._module_task_ids.get(identifier)
+        if task_id is None:
+            return
+        self.diagnostics_panel.update_task_status(task_id, status)
+        if progress is not None:
+            self.diagnostics_panel.update_task_progress(task_id, progress)
+
+    @QtCore.pyqtSlot(str)
+    def _on_module_activated(self, identifier: str) -> None:
+        self._update_module_status(identifier, self.tr("Activated"), progress=1.0)
+
+        def _reset_status() -> None:
+            self._update_module_status(identifier, self.tr("Ready"), progress=1.0)
+
+        QtCore.QTimer.singleShot(2000, _reset_status)
+
     def _on_pipeline_dock_visibility_changed(self, visible: bool) -> None:
         if hasattr(self, "show_pipeline_dock_action"):
             self.show_pipeline_dock_action.blockSignals(True)
@@ -1362,6 +1412,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.show_diagnostics_dock_action.blockSignals(False)
         self.diagnosticsDockVisibilityChanged.emit(visible)
 
+    def _focus_diagnostics_panel(self) -> None:
+        if not hasattr(self, "diagnostics_panel") or self.diagnostics_panel is None:
+            return
+        self.diagnostics_dock.setVisible(True)
+        self.diagnostics_panel.focus_logs()
+
     def _set_diagnostics_logging(self, enabled: bool) -> None:
         self.app_core.set_diagnostics_enabled(enabled)
         message = (
@@ -1369,7 +1425,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if enabled
             else "Diagnostics logging disabled."
         )
-        self._append_diagnostic_message(message)
+        LOGGER.info(message)
         self.statusBar().showMessage(message, 3000)
         self.diagnosticsLoggingToggled.emit(enabled)
 
@@ -1408,24 +1464,30 @@ class MainWindow(QtWidgets.QMainWindow):
             "Documentation files are not available in this build.",
         )
 
-    def _append_diagnostic_message(self, message: str) -> None:
-        if not hasattr(self, "diagnostics_log") or self.diagnostics_log is None:
-            return
-        timestamp = QtCore.QDateTime.currentDateTime().toString(
-            "yyyy-MM-dd hh:mm:ss.zzz"
-        )
-        self.diagnostics_log.appendPlainText(f"[{timestamp}] {message}")
-
     @QtCore.pyqtSlot(str)
     def _on_task_started(self, description: str) -> None:
         self._current_task_description = description or "Processing"
         self.statusBar().showMessage(self._current_task_description)
-        self._append_diagnostic_message(f"{self._current_task_description} started.")
+        self._task_counter += 1
+        task_id = f"task::{self._task_counter}"
+        self._active_task_id = task_id
+        if self.diagnostics_panel is not None:
+            self.diagnostics_panel.register_task(
+                task_id, self._current_task_description
+            )
+            self.diagnostics_panel.update_task_status(
+                task_id, self.tr("Running")
+            )
+        LOGGER.info("%s started.", self._current_task_description)
 
     @QtCore.pyqtSlot(int)
     def _on_task_progress(self, value: int) -> None:
         if self._progress_dialog is not None:
             self._progress_dialog.setValue(value)
+        if self.diagnostics_panel is not None and self._active_task_id is not None:
+            self.diagnostics_panel.update_task_progress(
+                self._active_task_id, value / 100.0
+            )
 
     @QtCore.pyqtSlot(object)
     def _on_task_finished(self, _result: object) -> None:
@@ -1433,9 +1495,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._progress_dialog.reset()
             self._progress_dialog = None
         self.statusBar().showMessage("Ready", 1500)
-        self._append_diagnostic_message(
-            f"{self._current_task_description or 'Processing'} completed successfully."
+        if self.diagnostics_panel is not None and self._active_task_id is not None:
+            self.diagnostics_panel.complete_task(self._active_task_id)
+        LOGGER.info(
+            "%s completed successfully.",
+            self._current_task_description or "Processing",
         )
+        self._active_task_id = None
 
     @QtCore.pyqtSlot()
     def _on_task_canceled(self) -> None:
@@ -1443,18 +1509,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self._progress_dialog.reset()
             self._progress_dialog = None
         self.statusBar().showMessage("Operation canceled", 2000)
-        self._append_diagnostic_message(
-            f"{self._current_task_description or 'Processing'} was canceled."
+        if self.diagnostics_panel is not None and self._active_task_id is not None:
+            self.diagnostics_panel.update_task_status(
+                self._active_task_id, self.tr("Canceled")
+            )
+        LOGGER.warning(
+            "%s was canceled.",
+            self._current_task_description or "Processing",
         )
+        self._active_task_id = None
 
     @QtCore.pyqtSlot(Exception, str)
     def _on_task_failed(self, error: Exception, stack: str) -> None:
         if self._progress_dialog is not None:
             self._progress_dialog.reset()
             self._progress_dialog = None
-        self._append_diagnostic_message(
-            f"{self._current_task_description or 'Processing'} failed: {error}"
-        )
+        if self.diagnostics_panel is not None and self._active_task_id is not None:
+            self.diagnostics_panel.update_task_status(
+                self._active_task_id,
+                self.tr("Failed"),
+            )
         context: Dict[str, object] = {
             "operation": "pipeline_task",
             "task": self._current_task_description or "Processing",
@@ -1471,6 +1545,12 @@ class MainWindow(QtWidgets.QMainWindow):
             fallback_traceback=stack,
         )
         self.statusBar().showMessage("Error during processing", 4000)
+        LOGGER.error(
+            "%s failed: %s",
+            self._current_task_description or "Processing",
+            error,
+        )
+        self._active_task_id = None
 
     def _ensure_source_registered(self, image: np.ndarray) -> Optional[str]:
         if self._source_id is None:
@@ -2229,6 +2309,11 @@ class MainWindow(QtWidgets.QMainWindow):
             on_cancel=_cancel,
             on_parameters_changed=_preview,
         )
+
+    def closeEvent(self, event):  # pragma: no cover - Qt virtual
+        if hasattr(self, "diagnostics_panel") and self.diagnostics_panel is not None:
+            self.diagnostics_panel.detach_from_logger()
+        super().closeEvent(event)
 
     def showEvent(self, event):  # pragma: no cover - Qt virtual
         super().showEvent(event)
