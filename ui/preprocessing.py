@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import threading
+import traceback
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -32,6 +33,11 @@ from ui.theme import (
     load_icon,
     scale_font,
 )
+
+from yam_processor.ui.error_reporter import ErrorResolution, present_error_report
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ImageDisplayWidget(QtWidgets.QLabel):
@@ -1255,6 +1261,47 @@ class MainWindow(QtWidgets.QMainWindow):
             if shortcut is not None:
                 self.shortcut_registry.register_shortcut(label, shortcut)
 
+    def _report_error(
+        self,
+        message: str,
+        *,
+        context: Optional[Dict[str, object]] = None,
+        window_title: Optional[str] = None,
+        enable_retry: bool = False,
+        retry_label: Optional[str] = None,
+        retry_callback: Optional[Callable[[], None]] = None,
+        fallback_traceback: Optional[str] = None,
+    ) -> None:
+        metadata: Dict[str, object] = {"module": "preprocessing"}
+        if context:
+            metadata.update(context)
+        resolution = present_error_report(
+            message,
+            logger=LOGGER,
+            parent=self,
+            window_title=window_title,
+            metadata=metadata,
+            enable_retry=enable_retry and retry_callback is not None,
+            retry_label=retry_label,
+            fallback_traceback=fallback_traceback,
+        )
+        if resolution is ErrorResolution.RETRY and retry_callback is not None:
+            try:
+                retry_callback()
+            except Exception as retry_error:  # pragma: no cover - user facing retry handling
+                retry_context = dict(context or {})
+                retry_context["retry_failed"] = True
+                retry_context["retry_error"] = str(retry_error)
+                self._report_error(
+                    self.tr("Retry failed: {error}").format(error=retry_error),
+                    context=retry_context,
+                    window_title=window_title,
+                    enable_retry=enable_retry,
+                    retry_label=retry_label,
+                    retry_callback=retry_callback,
+                    fallback_traceback=traceback.format_exc(),
+                )
+
     def _activate_module(self, module: ModuleBase) -> None:
         try:
             module.activate(self)
@@ -1268,11 +1315,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{module.metadata.title} is not available for activation.", 2000
             )
         except Exception as exc:  # pragma: no cover - defensive UI guard
-            logging.exception("Module activation failed: %%s", module.metadata.identifier)
-            QtWidgets.QMessageBox.critical(
-                self,
-                "Module Error",
-                f"{module.metadata.title} failed to run.\n{exc}",
+            context = {
+                "operation": "activate_module",
+                "module": module.metadata.identifier,
+                "title": module.metadata.title,
+            }
+            self._report_error(
+                self.tr("{title} failed to run.\n{error}").format(
+                    title=module.metadata.title,
+                    error=exc,
+                ),
+                context=context,
+                window_title=self.tr("Module Error"),
+                enable_retry=True,
+                retry_label=self.tr("&Retry Activation"),
+                retry_callback=lambda: self._activate_module(module),
             )
             self.statusBar().showMessage("Error running module action", 4000)
 
@@ -1395,14 +1452,23 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._progress_dialog is not None:
             self._progress_dialog.reset()
             self._progress_dialog = None
-        logging.error("Pipeline execution failed: %s\n%s", error, stack)
         self._append_diagnostic_message(
             f"{self._current_task_description or 'Processing'} failed: {error}"
         )
-        QtWidgets.QMessageBox.critical(
-            self,
-            "Processing Error",
-            f"{self._current_task_description} failed:\n{error}",
+        context: Dict[str, object] = {
+            "operation": "pipeline_task",
+            "task": self._current_task_description or "Processing",
+        }
+        if stack:
+            context["stack"] = stack
+        self._report_error(
+            self.tr("{task} failed: {error}").format(
+                task=self._current_task_description or self.tr("Processing"),
+                error=error,
+            ),
+            context=context,
+            window_title=self.tr("Processing Error"),
+            fallback_traceback=stack,
         )
         self.statusBar().showMessage("Error during processing", 4000)
 
@@ -1639,50 +1705,87 @@ class MainWindow(QtWidgets.QMainWindow):
         filename, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Export Pipeline Settings", "", "JSON Files (*.json)"
         )
-        if filename:
-            try:
-                payload = json.dumps(self.pipeline_manager.to_dict(), indent=2)
-                Path(filename).write_text(payload, encoding="utf-8")
-                QtWidgets.QMessageBox.information(self, "Pipeline Export", "Pipeline settings exported.")
-            except Exception as exc:  # pragma: no cover - user feedback
-                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to export pipeline: {exc}")
+        if not filename:
+            return
+        destination = Path(filename)
+
+        def _attempt_export() -> None:
+            payload = json.dumps(self.pipeline_manager.to_dict(), indent=2)
+            destination.write_text(payload, encoding="utf-8")
+            QtWidgets.QMessageBox.information(
+                self, "Pipeline Export", "Pipeline settings exported."
+            )
+
+        try:
+            _attempt_export()
+        except Exception as exc:  # pragma: no cover - user feedback
+            self._report_error(
+                self.tr("Failed to export pipeline: {error}").format(error=exc),
+                context={
+                    "operation": "export_pipeline",
+                    "destination": destination,
+                },
+                window_title=self.tr("Pipeline Export"),
+                enable_retry=True,
+                retry_label=self.tr("&Retry Export"),
+                retry_callback=_attempt_export,
+                fallback_traceback=traceback.format_exc(),
+            )
 
     def import_pipeline(self):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Import Pipeline Settings", "", "JSON Files (*.json)"
         )
-        if filename:
-            try:
-                payload = Path(filename).read_text(encoding="utf-8")
-                data = json.loads(payload)
-                self.pipeline_manager.push_state(
-                    image=None if self.committed_image is None else self.committed_image.copy(),
-                    cache_signature=self._committed_signature,
-                )
-                self.app_core.load_preprocessing_pipeline(data)
-                self.rebuild_pipeline()
-                if self.base_image is not None:
-                    def _applied(result: PipelineCacheResult) -> None:
-                        self._update_committed_from_result(result)
-                        QtWidgets.QMessageBox.information(
-                            self,
-                            "Pipeline Import",
-                            "Pipeline settings imported and applied.",
-                        )
+        if not filename:
+            return
+        source = Path(filename)
 
-                    self._apply_pipeline_async(
-                        description="Applying imported pipeline",
-                        on_finished=_applied,
-                    )
-                else:
+        def _attempt_import() -> None:
+            payload = source.read_text(encoding="utf-8")
+            data = json.loads(payload)
+            self.pipeline_manager.push_state(
+                image=None if self.committed_image is None else self.committed_image.copy(),
+                cache_signature=self._committed_signature,
+            )
+            self.app_core.load_preprocessing_pipeline(data)
+            self.rebuild_pipeline()
+            if self.base_image is not None:
+
+                def _applied(result: PipelineCacheResult) -> None:
+                    self._update_committed_from_result(result)
                     QtWidgets.QMessageBox.information(
                         self,
                         "Pipeline Import",
-                        "Pipeline settings imported.",
+                        "Pipeline settings imported and applied.",
                     )
-                self.update_undo_redo_actions()
-            except Exception as exc:  # pragma: no cover - user feedback
-                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to import pipeline: {exc}")
+
+                self._apply_pipeline_async(
+                    description="Applying imported pipeline",
+                    on_finished=_applied,
+                )
+            else:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Pipeline Import",
+                    "Pipeline settings imported.",
+                )
+            self.update_undo_redo_actions()
+
+        try:
+            _attempt_import()
+        except Exception as exc:  # pragma: no cover - user feedback
+            self._report_error(
+                self.tr("Failed to import pipeline: {error}").format(error=exc),
+                context={
+                    "operation": "import_pipeline",
+                    "source": source,
+                },
+                window_title=self.tr("Pipeline Import"),
+                enable_retry=True,
+                retry_label=self.tr("&Retry Import"),
+                retry_callback=_attempt_import,
+                fallback_traceback=traceback.format_exc(),
+            )
 
     def load_image(self):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -1690,31 +1793,48 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not filename:
             return
-        try:
-            image = Loader.load_image(filename)
-        except Exception as exc:  # pragma: no cover - user feedback
-            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load image: {exc}")
-            return
+        path = Path(filename)
 
-        if self._source_id is not None:
-            self.pipeline_cache.discard_cache(self._source_id)
-        self.original_image = image.copy()
-        self.base_image = image.copy()
-        self.committed_image = image.copy()
-        self.current_image_path = filename
-        self._source_id = self.pipeline_cache.register_source(self.base_image, hint=filename)
-        self._committed_signature = self._source_id
-        self._preview_signature = self._source_id
-        self._last_pipeline_metadata = self.pipeline_cache.metadata_for(
-            self._source_id, self._source_id
-        )
-        self.pipeline = build_preprocessing_pipeline(self.app_core, self.pipeline_manager)
-        self.original_display.set_image(self.original_image)
-        self.preview_display.set_image(self.base_image)
-        self.update_preview()
-        self.pipeline_manager.clear_history()
-        self.update_undo_redo_actions()
-        self.statusBar().showMessage(f"Loaded image: {filename}")
+        def _attempt_load() -> None:
+            image = Loader.load_image(str(path))
+            if self._source_id is not None:
+                self.pipeline_cache.discard_cache(self._source_id)
+            self.original_image = image.copy()
+            self.base_image = image.copy()
+            self.committed_image = image.copy()
+            self.current_image_path = str(path)
+            self._source_id = self.pipeline_cache.register_source(
+                self.base_image, hint=str(path)
+            )
+            self._committed_signature = self._source_id
+            self._preview_signature = self._source_id
+            self._last_pipeline_metadata = self.pipeline_cache.metadata_for(
+                self._source_id, self._source_id
+            )
+            self.pipeline = build_preprocessing_pipeline(self.app_core, self.pipeline_manager)
+            self.original_display.set_image(self.original_image)
+            self.preview_display.set_image(self.base_image)
+            self.update_preview()
+            self.pipeline_manager.clear_history()
+            self.update_undo_redo_actions()
+            self.statusBar().showMessage(f"Loaded image: {path}")
+
+        try:
+            _attempt_load()
+        except Exception as exc:  # pragma: no cover - user feedback
+            self._report_error(
+                self.tr("Failed to load image: {error}").format(error=exc),
+                context={
+                    "operation": "load_image",
+                    "source": path,
+                },
+                window_title=self.tr("Image Load Error"),
+                enable_retry=True,
+                retry_label=self.tr("&Retry Load"),
+                retry_callback=_attempt_load,
+                fallback_traceback=traceback.format_exc(),
+            )
+            return
 
     def save_processed_image(self):
         if self.committed_image is None:
