@@ -11,6 +11,8 @@ from typing import Any, Optional
 
 from PyQt5 import QtCore, QtWidgets  # type: ignore
 
+from yam_processor.ui.error_reporter import ErrorResolution, present_error_report
+
 
 @dataclass(slots=True)
 class AutosaveArtefact:
@@ -178,18 +180,33 @@ class RecoveryManager:
                 self._tr("{count} backup file(s) are also available").format(count=count_backups)
             )
 
-        box = QtWidgets.QMessageBox(parent)
-        box.setWindowTitle(window_title)
-        box.setIcon(QtWidgets.QMessageBox.Question)
-        box.setText(message)
-        if details:
-            box.setInformativeText("\n".join(details))
-        restore_button = box.addButton(self._tr("&Restore"), QtWidgets.QMessageBox.AcceptRole)
-        box.addButton(self._tr("&Discard"), QtWidgets.QMessageBox.DestructiveRole)
-        box.setDefaultButton(restore_button)
-        box.exec_()
-        clicked = box.clickedButton()
-        if clicked == restore_button:
+        metadata: dict[str, object] = {
+            "operation": "autosave_prompt",
+            "payload_path": artefact.payload_path,
+        }
+        if artefact.metadata_path:
+            metadata["metadata_path"] = artefact.metadata_path
+        if destination:
+            metadata["destination"] = destination
+        backups_dir = self._autosave_dir / "backups"
+        if backups_dir.exists():
+            metadata["backup_paths"] = sorted(backups_dir.glob("*"))
+        resolution = present_error_report(
+            message,
+            logger=self._logger,
+            parent=parent,
+            window_title=window_title,
+            metadata=metadata,
+            component="RecoveryManager",
+            enable_retry=True,
+            retry_label=self._tr("&Restore"),
+            enable_discard=True,
+            discard_label=self._tr("&Discard"),
+            fallback_traceback=self._tr(
+                "An autosave snapshot was detected. Review the logs for crash details."
+            ),
+        )
+        if resolution is ErrorResolution.RETRY:
             return "restore"
         return "discard"
 

@@ -33,6 +33,11 @@ from ui.theme import (
     scale_font,
 )
 
+from yam_processor.ui.error_reporter import ErrorResolution, present_error_report
+
+
+LOGGER = logging.getLogger(__name__)
+
 
 def _apply_common_metadata(widget: QtWidgets.QWidget, metadata: Optional[ControlMetadata]) -> None:
     if metadata is None:
@@ -1931,33 +1936,112 @@ class MainWindow(QtWidgets.QMainWindow):
             if backup is not None:
                 self.preview_display.set_image(backup)
 
-    def load_image(self):
-        filename, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Load Image", "", "Images (*.png *.jpg *.bmp *.tiff *.npy)")
-        if filename:
+    def _report_error(
+        self,
+        message: str,
+        *,
+        context: Optional[Dict[str, object]] = None,
+        window_title: Optional[str] = None,
+        enable_retry: bool = False,
+        retry_label: Optional[str] = None,
+        retry_callback: Optional[Callable[[], None]] = None,
+        fallback_traceback: Optional[str] = None,
+    ) -> None:
+        metadata: Dict[str, object] = {"module": "segmentation"}
+        if context:
+            metadata.update(context)
+        resolution = present_error_report(
+            message,
+            logger=LOGGER,
+            parent=self,
+            window_title=window_title,
+            metadata=metadata,
+            enable_retry=enable_retry and retry_callback is not None,
+            retry_label=retry_label,
+            fallback_traceback=fallback_traceback,
+        )
+        if resolution is ErrorResolution.RETRY and retry_callback is not None:
             try:
-                self.original_image = Loader.load_image(filename)
-                self.base_image = self.original_image.copy()
-                self.committed_image = build_segmentation_pipeline(self.app_core).apply(self.base_image)
-                self.current_preview = self.committed_image.copy()
-                self.current_image_path = filename
-                self.original_display.set_image(self.original_image)
-                self.preview_display.set_image(self.current_preview)
-                self.undo_stack.clear()
-                self.redo_stack.clear()
-                self.update_undo_redo_actions()
-                self.statusBar().showMessage("Image loaded.")
-                # Reset segmentation toggles.
-                for m in ["Global","Otsu","Adaptive","Edge","Watershed","Sobel","Prewitt",
-                          "Laplacian","Region Growing","Region Splitting/Merging","K-Means",
-                          "Fuzzy C-Means","Mean Shift","GMM","Graph Cuts","Active Contour",
-                          "Opening","Closing","Dilation","Erosion","Border Removal"]:
-                    self.settings.setValue(f"segmentation/{m}/enabled", False)
-                self.settings.setValue("segmentation/order", "")
-                self.order_manager.set_order([])
-                self.rebuild_pipeline()
-            except Exception as e:
-                logging.exception("Error loading image.")
-                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load image:\n{e}")
+                retry_callback()
+            except Exception as retry_error:  # pragma: no cover - user feedback
+                retry_context = dict(context or {})
+                retry_context["retry_failed"] = True
+                retry_context["retry_error"] = str(retry_error)
+                self._report_error(
+                    self.tr("Retry failed: {error}").format(error=retry_error),
+                    context=retry_context,
+                    window_title=window_title,
+                    enable_retry=enable_retry,
+                    retry_label=retry_label,
+                    retry_callback=retry_callback,
+                    fallback_traceback=traceback.format_exc(),
+                )
+
+    def load_image(self):
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Image", "", "Images (*.png *.jpg *.bmp *.tiff *.npy)"
+        )
+        if not filename:
+            return
+        path = Path(filename)
+
+        def _attempt_load() -> None:
+            self.original_image = Loader.load_image(str(path))
+            self.base_image = self.original_image.copy()
+            self.committed_image = build_segmentation_pipeline(self.app_core).apply(
+                self.base_image
+            )
+            self.current_preview = self.committed_image.copy()
+            self.current_image_path = str(path)
+            self.original_display.set_image(self.original_image)
+            self.preview_display.set_image(self.current_preview)
+            self.undo_stack.clear()
+            self.redo_stack.clear()
+            self.update_undo_redo_actions()
+            self.statusBar().showMessage("Image loaded.")
+            for m in [
+                "Global",
+                "Otsu",
+                "Adaptive",
+                "Edge",
+                "Watershed",
+                "Sobel",
+                "Prewitt",
+                "Laplacian",
+                "Region Growing",
+                "Region Splitting/Merging",
+                "K-Means",
+                "Fuzzy C-Means",
+                "Mean Shift",
+                "GMM",
+                "Graph Cuts",
+                "Active Contour",
+                "Opening",
+                "Closing",
+                "Dilation",
+                "Erosion",
+                "Border Removal",
+            ]:
+                self.settings.setValue(f"segmentation/{m}/enabled", False)
+            self.settings.setValue("segmentation/order", "")
+            self.order_manager.set_order([])
+            self.rebuild_pipeline()
+
+        try:
+            _attempt_load()
+        except Exception as error:
+            self._report_error(
+                self.tr("Failed to load image: {error}").format(error=error),
+                context={
+                    "operation": "load_image",
+                    "source": path,
+                },
+                window_title=self.tr("Image Load Error"),
+                enable_retry=True,
+                retry_label=self.tr("&Retry Load"),
+                retry_callback=_attempt_load,
+                fallback_traceback=traceback.format_exc(),
+            )
 
     def update_preview(self):
         if self.base_image is None:
@@ -1971,33 +2055,51 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.current_preview is None:
             QtWidgets.QMessageBox.warning(self, "Warning", "No segmented image to save.")
             return
-        filename, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Segmented Image", "", "Image Files (*.bmp *.png *.jpg *.tiff *.npy)")
-        if filename:
-            try:
-                io_manager = self.app_core.io_manager
-                pipeline_settings = get_settings_snapshot(self.settings_manager)
-                pipeline_metadata = _build_segmentation_pipeline_metadata(pipeline_settings)
-                metadata: Dict[str, Any] = {
-                    "stage": "segmentation",
-                    "mode": "single",
-                }
-                if self.current_image_path:
-                    metadata["source"] = {"input": self.current_image_path}
-                result = io_manager.save_image(
-                    filename,
-                    self.current_preview,
-                    metadata=metadata,
-                    pipeline=pipeline_metadata,
-                    settings_snapshot=pipeline_settings,
-                )
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "Save Image",
-                    f"Image saved successfully to {result.image_path}",
-                )
-            except Exception as e:
-                logging.exception("Error saving image.")
-                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to save image:\n{e}")
+        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Segmented Image", "", "Image Files (*.bmp *.png *.jpg *.tiff *.npy)"
+        )
+        if not filename:
+            return
+        destination = Path(filename)
+        io_manager = self.app_core.io_manager
+
+        def _attempt_save() -> None:
+            pipeline_settings = get_settings_snapshot(self.settings_manager)
+            pipeline_metadata = _build_segmentation_pipeline_metadata(pipeline_settings)
+            metadata: Dict[str, Any] = {
+                "stage": "segmentation",
+                "mode": "single",
+            }
+            if self.current_image_path:
+                metadata["source"] = {"input": self.current_image_path}
+            result = io_manager.save_image(
+                str(destination),
+                self.current_preview,
+                metadata=metadata,
+                pipeline=pipeline_metadata,
+                settings_snapshot=pipeline_settings,
+            )
+            QtWidgets.QMessageBox.information(
+                self,
+                "Save Image",
+                f"Image saved successfully to {result.image_path}",
+            )
+
+        try:
+            _attempt_save()
+        except Exception as error:
+            self._report_error(
+                self.tr("Failed to save image: {error}").format(error=error),
+                context={
+                    "operation": "save_segmented_image",
+                    "destination": destination,
+                },
+                window_title=self.tr("Save Image"),
+                enable_retry=True,
+                retry_label=self.tr("&Retry Save"),
+                retry_callback=_attempt_save,
+                fallback_traceback=traceback.format_exc(),
+            )
 
     def mass_process(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder for Mass Processing")
@@ -2041,34 +2143,70 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def export_pipeline(self):
         filename, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export Pipeline Settings", "", "JSON Files (*.json)")
-        if filename:
-            try:
-                payload = self.settings_manager.to_json(
-                    prefix="segmentation/", strip_prefix=True
-                )
-                Path(filename).write_text(payload, encoding="utf-8")
-                QtWidgets.QMessageBox.information(self, "Export Pipeline", "Pipeline settings exported successfully.")
-            except Exception as e:
-                logging.exception("Error exporting pipeline.")
-                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to export pipeline:\n{e}")
+        if not filename:
+            return
+        destination = Path(filename)
+
+        def _attempt_export() -> None:
+            payload = self.settings_manager.to_json(
+                prefix="segmentation/", strip_prefix=True
+            )
+            destination.write_text(payload, encoding="utf-8")
+            QtWidgets.QMessageBox.information(
+                self, "Export Pipeline", "Pipeline settings exported successfully."
+            )
+
+        try:
+            _attempt_export()
+        except Exception as error:
+            self._report_error(
+                self.tr("Failed to export pipeline: {error}").format(error=error),
+                context={
+                    "operation": "export_segmentation_pipeline",
+                    "destination": destination,
+                },
+                window_title=self.tr("Export Pipeline"),
+                enable_retry=True,
+                retry_label=self.tr("&Retry Export"),
+                retry_callback=_attempt_export,
+                fallback_traceback=traceback.format_exc(),
+            )
 
     def import_pipeline(self):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import Pipeline Settings", "", "JSON Files (*.json)")
-        if filename:
-            try:
-                payload = Path(filename).read_text(encoding="utf-8")
-                self.settings_manager.from_json(
-                    payload, prefix="segmentation/", clear=True
-                )
-                self.rebuild_pipeline()
-                if self.base_image is not None:
-                    self.committed_image = self.pipeline.apply(self.base_image)
-                    self.current_preview = self.committed_image.copy()
-                    self.preview_display.set_image(self.current_preview)
-                QtWidgets.QMessageBox.information(self, "Import Pipeline", "Pipeline settings imported successfully.")
-            except Exception as e:
-                logging.exception("Error importing pipeline.")
-                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to import pipeline:\n{e}")
+        if not filename:
+            return
+        source = Path(filename)
+
+        def _attempt_import() -> None:
+            payload = source.read_text(encoding="utf-8")
+            self.settings_manager.from_json(
+                payload, prefix="segmentation/", clear=True
+            )
+            self.rebuild_pipeline()
+            if self.base_image is not None:
+                self.committed_image = self.pipeline.apply(self.base_image)
+                self.current_preview = self.committed_image.copy()
+                self.preview_display.set_image(self.current_preview)
+            QtWidgets.QMessageBox.information(
+                self, "Import Pipeline", "Pipeline settings imported successfully."
+            )
+
+        try:
+            _attempt_import()
+        except Exception as error:
+            self._report_error(
+                self.tr("Failed to import pipeline: {error}").format(error=error),
+                context={
+                    "operation": "import_segmentation_pipeline",
+                    "source": source,
+                },
+                window_title=self.tr("Import Pipeline"),
+                enable_retry=True,
+                retry_label=self.tr("&Retry Import"),
+                retry_callback=_attempt_import,
+                fallback_traceback=traceback.format_exc(),
+            )
 
 #####################################
 # 10. MAIN ENTRY POINT

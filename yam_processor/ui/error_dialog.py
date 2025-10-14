@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping, Optional
+from typing import Callable, Mapping, Optional
 
 from PyQt5 import QtCore, QtWidgets  # type: ignore
 
@@ -79,16 +79,20 @@ class ErrorDialog(QtWidgets.QDialog):
         traceback_layout.addWidget(self._trace_edit)
         layout.addWidget(traceback_group, 1)
 
-        button_box = QtWidgets.QDialogButtonBox(self)
-        self._copy_button = button_box.addButton(
+        self._button_box = QtWidgets.QDialogButtonBox(self)
+        self._copy_button = self._button_box.addButton(
             self.tr("Copy details"), QtWidgets.QDialogButtonBox.ActionRole
         )
         self._copy_button.clicked.connect(self.copy_to_clipboard)
-        close_button = button_box.addButton(
+        close_button = self._button_box.addButton(
             QtWidgets.QDialogButtonBox.Close
         )
         close_button.clicked.connect(self.accept)
-        layout.addWidget(button_box)
+        self._status_label = QtWidgets.QLabel(self)
+        self._status_label.setWordWrap(True)
+        self._status_label.setVisible(False)
+        layout.addWidget(self._status_label)
+        layout.addWidget(self._button_box)
 
     @QtCore.pyqtSlot()
     def copy_to_clipboard(self) -> None:
@@ -100,6 +104,34 @@ class ErrorDialog(QtWidgets.QDialog):
             sections.append("\n".join(f"{key}: {value}" for key, value in self._metadata.items()))
         sections.append(self._traceback_text)
         clipboard.setText("\n\n".join(section for section in sections if section))
+
+    def add_action_button(
+        self,
+        label: str,
+        *,
+        role: QtWidgets.QDialogButtonBox.ButtonRole = QtWidgets.QDialogButtonBox.ActionRole,
+        callback: Optional[Callable[[], None]] = None,
+    ) -> QtWidgets.QAbstractButton:
+        """Add a custom action button to the dialog."""
+
+        button = self._button_box.addButton(label, role)
+        if callback is not None:
+            button.clicked.connect(callback)
+        return button
+
+    def set_status_message(self, text: str, *, error: bool = False) -> None:
+        """Display a transient status message beneath the actions."""
+
+        if not text:
+            self._status_label.clear()
+            self._status_label.setVisible(False)
+            return
+        self._status_label.setText(text)
+        if error:
+            self._status_label.setStyleSheet("color: #b00020;")
+        else:
+            self._status_label.setStyleSheet("")
+        self._status_label.setVisible(True)
 
     @classmethod
     def present(

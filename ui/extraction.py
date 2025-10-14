@@ -24,6 +24,8 @@ from processing.extraction_pipeline import (
     get_extraction_settings_snapshot,
 )
 
+from yam_processor.ui.error_reporter import ErrorResolution, present_error_report
+
 
 def _build_extraction_pipeline_metadata(settings: Mapping[str, Any]) -> Dict[str, Any]:
     order_value = settings.get("extraction/order", "")
@@ -40,6 +42,9 @@ def _build_extraction_pipeline_metadata(settings: Mapping[str, Any]) -> Dict[str
         "order": order_list,
         "enabled": enabled_steps,
     }
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 try:
@@ -867,35 +872,97 @@ class MainWindow(QtWidgets.QMainWindow):
             if backup is not None:
                 self.preview_display.set_image(backup)
 
-    def load_image(self):
-        filename, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Load Image", "", "Images (*.png *.jpg *.bmp *.tiff *.npy)")
-        if filename:
+    def _report_error(
+        self,
+        message: str,
+        *,
+        context: Optional[Dict[str, object]] = None,
+        window_title: Optional[str] = None,
+        enable_retry: bool = False,
+        retry_label: Optional[str] = None,
+        retry_callback: Optional[Callable[[], None]] = None,
+        fallback_traceback: Optional[str] = None,
+    ) -> None:
+        metadata: Dict[str, object] = {"module": "extraction"}
+        if context:
+            metadata.update(context)
+        resolution = present_error_report(
+            message,
+            logger=LOGGER,
+            parent=self,
+            window_title=window_title,
+            metadata=metadata,
+            enable_retry=enable_retry and retry_callback is not None,
+            retry_label=retry_label,
+            fallback_traceback=fallback_traceback,
+        )
+        if resolution is ErrorResolution.RETRY and retry_callback is not None:
             try:
-                self.original_image = Loader.load_image(filename)
-                self.base_image = self.original_image.copy()
-                self.committed_image = build_extraction_pipeline(self.app_core).apply(self.base_image)
-                self.current_preview = self.committed_image.copy()
-                self.current_image_path = filename
-                self.original_display.set_image(self.original_image)
-                self.preview_display.set_image(self.current_preview)
-                self.undo_stack.clear()
-                self.redo_stack.clear()
-                self.update_undo_redo_actions()
-                self.statusBar().showMessage("Image loaded.")
-                self.settings.setValue("extraction/Region Properties/enabled", False)
-                self.settings.setValue("extraction/Hu Moments/enabled", False)
-                self.settings.setValue("extraction/LBP/enabled", False)
-                self.settings.setValue("extraction/Haralick/enabled", False)
-                self.settings.setValue("extraction/Gabor/enabled", False)
-                self.settings.setValue("extraction/Fourier/enabled", False)
-                self.settings.setValue("extraction/HOG/enabled", False)
-                self.settings.setValue("extraction/Histogram/enabled", False)
-                self.settings.setValue("extraction/Fractal/enabled", False)
-                self.settings.setValue("extraction/Approximate Shape/enabled", False)
-                self.order_manager.set_order([])
-                self.rebuild_pipeline()
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load image: {e}")
+                retry_callback()
+            except Exception as retry_error:  # pragma: no cover - user feedback
+                retry_context = dict(context or {})
+                retry_context["retry_failed"] = True
+                retry_context["retry_error"] = str(retry_error)
+                self._report_error(
+                    self.tr("Retry failed: {error}").format(error=retry_error),
+                    context=retry_context,
+                    window_title=window_title,
+                    enable_retry=enable_retry,
+                    retry_label=retry_label,
+                    retry_callback=retry_callback,
+                    fallback_traceback=traceback.format_exc(),
+                )
+
+    def load_image(self):
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Image", "", "Images (*.png *.jpg *.bmp *.tiff *.npy)"
+        )
+        if not filename:
+            return
+        path = Path(filename)
+
+        def _attempt_load() -> None:
+            self.original_image = Loader.load_image(str(path))
+            self.base_image = self.original_image.copy()
+            self.committed_image = build_extraction_pipeline(self.app_core).apply(
+                self.base_image
+            )
+            self.current_preview = self.committed_image.copy()
+            self.current_image_path = str(path)
+            self.original_display.set_image(self.original_image)
+            self.preview_display.set_image(self.current_preview)
+            self.undo_stack.clear()
+            self.redo_stack.clear()
+            self.update_undo_redo_actions()
+            self.statusBar().showMessage("Image loaded.")
+            self.settings.setValue("extraction/Region Properties/enabled", False)
+            self.settings.setValue("extraction/Hu Moments/enabled", False)
+            self.settings.setValue("extraction/LBP/enabled", False)
+            self.settings.setValue("extraction/Haralick/enabled", False)
+            self.settings.setValue("extraction/Gabor/enabled", False)
+            self.settings.setValue("extraction/Fourier/enabled", False)
+            self.settings.setValue("extraction/HOG/enabled", False)
+            self.settings.setValue("extraction/Histogram/enabled", False)
+            self.settings.setValue("extraction/Fractal/enabled", False)
+            self.settings.setValue("extraction/Approximate Shape/enabled", False)
+            self.order_manager.set_order([])
+            self.rebuild_pipeline()
+
+        try:
+            _attempt_load()
+        except Exception as error:
+            self._report_error(
+                self.tr("Failed to load image: {error}").format(error=error),
+                context={
+                    "operation": "load_image",
+                    "source": path,
+                },
+                window_title=self.tr("Image Load Error"),
+                enable_retry=True,
+                retry_label=self.tr("&Retry Load"),
+                retry_callback=_attempt_load,
+                fallback_traceback=traceback.format_exc(),
+            )
 
     def update_preview(self):
         if self.base_image is None:
@@ -910,30 +977,47 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Warning", "No extracted image to save.")
             return
         filename, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Extracted Image", "", "Image Files (*.bmp *.png *.jpg *.tiff *.npy)")
-        if filename:
-            try:
-                pipeline_settings = get_extraction_settings_snapshot(self.settings_manager)
-                pipeline_metadata = _build_extraction_pipeline_metadata(pipeline_settings)
-                metadata: Dict[str, Any] = {
-                    "stage": "extraction",
-                    "mode": "single",
-                }
-                if self.current_image_path:
-                    metadata["source"] = {"input": self.current_image_path}
-                result = self.app_core.io_manager.save_image(
-                    filename,
-                    self.current_preview,
-                    metadata=metadata,
-                    pipeline=pipeline_metadata,
-                    settings_snapshot=pipeline_settings,
-                )
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "Save Image",
-                    f"Image saved successfully to {result.image_path}",
-                )
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
+        if not filename:
+            return
+        destination = Path(filename)
+
+        def _attempt_save() -> None:
+            pipeline_settings = get_extraction_settings_snapshot(self.settings_manager)
+            pipeline_metadata = _build_extraction_pipeline_metadata(pipeline_settings)
+            metadata: Dict[str, Any] = {
+                "stage": "extraction",
+                "mode": "single",
+            }
+            if self.current_image_path:
+                metadata["source"] = {"input": self.current_image_path}
+            result = self.app_core.io_manager.save_image(
+                str(destination),
+                self.current_preview,
+                metadata=metadata,
+                pipeline=pipeline_metadata,
+                settings_snapshot=pipeline_settings,
+            )
+            QtWidgets.QMessageBox.information(
+                self,
+                "Save Image",
+                f"Image saved successfully to {result.image_path}",
+            )
+
+        try:
+            _attempt_save()
+        except Exception as error:
+            self._report_error(
+                self.tr("Failed to save image: {error}").format(error=error),
+                context={
+                    "operation": "save_processed_image",
+                    "destination": destination,
+                },
+                window_title=self.tr("Save Image"),
+                enable_retry=True,
+                retry_label=self.tr("&Retry Save"),
+                retry_callback=_attempt_save,
+                fallback_traceback=traceback.format_exc(),
+            )
 
     def mass_extract_folder(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder for Mass Extraction")
@@ -981,21 +1065,52 @@ class MainWindow(QtWidgets.QMainWindow):
             # Here we use a dummy path since the function only uses the basename
             count = export_segmented_regions(self.original_image, "dummy_path.png")
             QtWidgets.QMessageBox.information(self, "Export Segmented Regions", f"Exported {count} regions.")
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to export regions: {e}")
+        except Exception as error:
+            self._report_error(
+                self.tr("Failed to export regions: {error}").format(error=error),
+                context={
+                    "operation": "export_regions",
+                    "source": self.current_image_path or "",
+                },
+                window_title=self.tr("Export Segmented Regions"),
+                enable_retry=True,
+                retry_label=self.tr("&Retry Export"),
+                retry_callback=self.export_regions,
+                fallback_traceback=traceback.format_exc(),
+            )
 
     def export_data(self):
         if self.original_image is None:
             QtWidgets.QMessageBox.warning(self, "Warning", "No image loaded.")
             return
-        try:
-            base_name = "extracted_data"
-            output_folder = Config.OUTPUT_DIR
+        base_name = "extracted_data"
+        output_folder = Config.OUTPUT_DIR
+
+        def _attempt_export() -> None:
             os.makedirs(output_folder, exist_ok=True)
-            self.export_all_extraction_data(self.pipeline.apply(self.original_image), base_name, output_folder)
-            QtWidgets.QMessageBox.information(self, "Export Extraction Data", f"Data exported to {output_folder}")
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to export extraction data: {e}")
+            self.export_all_extraction_data(
+                self.pipeline.apply(self.original_image), base_name, output_folder
+            )
+            QtWidgets.QMessageBox.information(
+                self, "Export Extraction Data", f"Data exported to {output_folder}"
+            )
+
+        try:
+            _attempt_export()
+        except Exception as error:
+            self._report_error(
+                self.tr("Failed to export extraction data: {error}").format(error=error),
+                context={
+                    "operation": "export_extraction_data",
+                    "destination": Path(output_folder),
+                    "base_name": base_name,
+                },
+                window_title=self.tr("Export Extraction Data"),
+                enable_retry=True,
+                retry_label=self.tr("&Retry Export"),
+                retry_callback=_attempt_export,
+                fallback_traceback=traceback.format_exc(),
+            )
 
     def mass_export_data(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder for Mass Export Extraction Data")
@@ -1066,32 +1181,70 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def import_settings(self):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import Extraction Settings", "", "JSON Files (*.json)")
-        if filename:
-            try:
-                payload = Path(filename).read_text(encoding="utf-8")
-                self.settings_manager.from_json(
-                    payload, prefix="extraction/", clear=True
-                )
-                self.rebuild_pipeline()
-                if self.base_image is not None:
-                    self.committed_image = self.pipeline.apply(self.base_image)
-                    self.current_preview = self.committed_image.copy()
-                    self.preview_display.set_image(self.current_preview)
-                QtWidgets.QMessageBox.information(self, "Settings Import", "Extraction settings imported successfully.")
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to import extraction settings: {e}")
+        if not filename:
+            return
+        source = Path(filename)
+
+        def _attempt_import() -> None:
+            payload = source.read_text(encoding="utf-8")
+            self.settings_manager.from_json(
+                payload, prefix="extraction/", clear=True
+            )
+            self.rebuild_pipeline()
+            if self.base_image is not None:
+                self.committed_image = self.pipeline.apply(self.base_image)
+                self.current_preview = self.committed_image.copy()
+                self.preview_display.set_image(self.current_preview)
+            QtWidgets.QMessageBox.information(
+                self, "Settings Import", "Extraction settings imported successfully."
+            )
+
+        try:
+            _attempt_import()
+        except Exception as error:
+            self._report_error(
+                self.tr("Failed to import extraction settings: {error}").format(error=error),
+                context={
+                    "operation": "import_extraction_settings",
+                    "source": source,
+                },
+                window_title=self.tr("Settings Import"),
+                enable_retry=True,
+                retry_label=self.tr("&Retry Import"),
+                retry_callback=_attempt_import,
+                fallback_traceback=traceback.format_exc(),
+            )
 
     def export_settings(self):
         filename, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export Extraction Settings", "", "JSON Files (*.json)")
-        if filename:
-            try:
-                payload = self.settings_manager.to_json(
-                    prefix="extraction/", strip_prefix=True
-                )
-                Path(filename).write_text(payload, encoding="utf-8")
-                QtWidgets.QMessageBox.information(self, "Settings Export", "Extraction settings exported successfully.")
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to export extraction settings: {e}")
+        if not filename:
+            return
+        destination = Path(filename)
+
+        def _attempt_export() -> None:
+            payload = self.settings_manager.to_json(
+                prefix="extraction/", strip_prefix=True
+            )
+            destination.write_text(payload, encoding="utf-8")
+            QtWidgets.QMessageBox.information(
+                self, "Settings Export", "Extraction settings exported successfully."
+            )
+
+        try:
+            _attempt_export()
+        except Exception as error:
+            self._report_error(
+                self.tr("Failed to export extraction settings: {error}").format(error=error),
+                context={
+                    "operation": "export_extraction_settings",
+                    "destination": destination,
+                },
+                window_title=self.tr("Settings Export"),
+                enable_retry=True,
+                retry_label=self.tr("&Retry Export"),
+                retry_callback=_attempt_export,
+                fallback_traceback=traceback.format_exc(),
+            )
 
 #####################################
 # MAIN ENTRY POINT
