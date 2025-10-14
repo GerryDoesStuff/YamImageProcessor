@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import logging
 import pkgutil
 import shutil
@@ -9,13 +10,15 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from plugins.module_base import ModuleBase, ModuleStage
 
 from .thread_controller import ThreadController
 
 from .io_manager import IOManager
+from .path_sanitizer import PathValidationError, allowed_roots as sanitizer_allowed_roots
+from .path_sanitizer import configure_allowed_roots
 from .persistence import AutosaveManager
 from .recovery import RecoveryManager
 from .settings import SettingsManager
@@ -42,6 +45,7 @@ class AppConfiguration:
     autosave_interval_seconds: float = 120.0
     autosave_backup_retention: int = 5
     autosave_enabled_default: bool = True
+    allowed_roots: Sequence[Path | str] = field(default_factory=lambda: [Path.cwd()])
     translation_directories: Sequence[Path | str] = field(
         default_factory=lambda: [Path(__file__).resolve().parent.parent / "translations"]
     )
@@ -76,6 +80,7 @@ class AppCore:
         self.session_temp_root: Optional[Path] = None
         self.session_pipeline_cache_dir: Optional[Path] = None
         self.session_recovery_dir: Optional[Path] = None
+        self.autosave_workspace: Optional[Path] = None
 
     # ------------------------------------------------------------------
     # Lifecycle management
@@ -86,6 +91,7 @@ class AppCore:
             return
 
         self._prepare_session_temp_root()
+        self._refresh_allowed_roots()
         self._configure_logging()
         self._init_settings()
         self._init_threading()
@@ -141,6 +147,17 @@ class AppCore:
         if self.settings_manager is None:
             raise RuntimeError("Settings manager not initialised. Call bootstrap() first.")
         return self.settings_manager
+
+    @property
+    def allowed_roots(self) -> tuple[Path, ...]:
+        """Expose the currently configured sandbox roots."""
+
+        return sanitizer_allowed_roots()
+
+    def refresh_allowed_roots(self) -> None:
+        """Recalculate the configured allowed roots."""
+
+        self._refresh_allowed_roots()
 
     @property
     def io_manager(self) -> IOManager:
@@ -262,6 +279,7 @@ class AppCore:
             self._coerce_bool(stored_diagnostics), persist=False
         )
         self._io_manager = IOManager(self.settings_manager)
+        self._refresh_allowed_roots()
         self._init_autosave()
         self.logger.debug(
             "Settings manager initialised",
@@ -288,6 +306,7 @@ class AppCore:
             )
             self.settings_manager.set_autosave_workspace(workspace)
         workspace = Path(workspace)
+        self.autosave_workspace = workspace
 
         autosave_logger = logging.getLogger(f"{__name__}.Autosave")
         self.autosave_manager = AutosaveManager(
@@ -304,6 +323,7 @@ class AppCore:
             logger=recovery_logger,
         )
         self.recovery_manager.inspect_startup()
+        self._refresh_allowed_roots()
         self.logger.debug(
             "Autosave manager initialised",
             extra={"component": "AppCore", "autosave_dir": str(workspace)},
@@ -508,6 +528,8 @@ class AppCore:
         self.session_pipeline_cache_dir = pipeline_cache_dir
         self.session_recovery_dir = recovery_dir
 
+        self._refresh_allowed_roots()
+
         PipelineCache.set_default_cache_directory(pipeline_cache_dir)
         PipelineManager.set_default_cache_directory(pipeline_cache_dir)
         PipelineManager.set_default_recovery_root(recovery_dir)
@@ -558,6 +580,79 @@ class AppCore:
         self.session_temp_root = None
         self.session_pipeline_cache_dir = None
         self.session_recovery_dir = None
+
+    def _refresh_allowed_roots(self) -> None:
+        candidates = list(self._collect_allowed_root_candidates())
+        if not candidates:
+            candidates.append(Path.cwd())
+        try:
+            configure_allowed_roots(candidates)
+        except PathValidationError as exc:
+            self.logger.warning(
+                "Failed to configure allowed roots",
+                extra={
+                    "component": "AppCore",
+                    "error": str(exc),
+                    "candidates": [str(path) for path in candidates],
+                },
+            )
+            raise
+        self.logger.debug(
+            "Allowed roots configured",
+            extra={
+                "component": "AppCore",
+                "roots": [str(path) for path in sanitizer_allowed_roots()],
+            },
+        )
+
+    def _collect_allowed_root_candidates(self) -> Iterable[Path]:
+        candidates: list[Path] = []
+
+        def _append(value: Path | str | None) -> None:
+            if value in (None, ""):
+                return
+            path = Path(value).expanduser()
+            if not path.is_absolute():
+                path = Path.cwd() / path
+            candidates.append(path)
+
+        for entry in self.config.allowed_roots:
+            _append(entry)
+
+        for entry in self._iter_settings_allowed_roots():
+            _append(entry)
+
+        _append(self.session_temp_root)
+        _append(self.session_pipeline_cache_dir)
+        _append(self.session_recovery_dir)
+        _append(self.autosave_workspace)
+
+        return candidates
+
+    def _iter_settings_allowed_roots(self) -> Iterable[Path | str]:
+        if self.settings_manager is None:
+            return ()
+        stored = self.settings_manager.get("io/allowed_roots", None)
+        return self._coerce_allowed_roots_setting(stored)
+
+    @staticmethod
+    def _coerce_allowed_roots_setting(value: Any) -> Iterable[Path | str]:
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return ()
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return (text,)
+            if isinstance(parsed, (list, tuple)):
+                return tuple(parsed)
+            return (text,)
+        if isinstance(value, (list, tuple, set)):
+            return tuple(value)
+        return (value,)
 
     @staticmethod
     def _coerce_bool(value: object) -> bool:

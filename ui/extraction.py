@@ -16,6 +16,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from core.app_core import AppCore
 from core.extraction import Config, Loader, Preprocessor, parse_bool
+from core.path_sanitizer import PathValidationError, sanitize_user_path
 from processing.extraction_pipeline import (
     PipelineStep,
     ProcessingPipeline,
@@ -913,13 +914,53 @@ class MainWindow(QtWidgets.QMainWindow):
                     fallback_traceback=traceback.format_exc(),
                 )
 
+    def _sanitize_dialog_path(
+        self,
+        raw_path: str,
+        *,
+        allow_directory: bool,
+        allow_file: bool,
+        must_exist: bool,
+        operation: str,
+        window_title: str,
+        message_template: str,
+        extra_context: Optional[Dict[str, object]] = None,
+    ) -> Optional[Path]:
+        if not raw_path:
+            return None
+        try:
+            return sanitize_user_path(
+                raw_path,
+                must_exist=must_exist,
+                allow_directory=allow_directory,
+                allow_file=allow_file,
+            )
+        except PathValidationError as exc:
+            context: Dict[str, object] = {"operation": operation, "path": raw_path}
+            if extra_context:
+                context.update(extra_context)
+            self._report_error(
+                message_template.format(error=exc),
+                context=context,
+                window_title=window_title,
+            )
+            return None
+
     def load_image(self):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Load Image", "", "Images (*.png *.jpg *.bmp *.tiff *.npy)"
         )
-        if not filename:
+        path = self._sanitize_dialog_path(
+            filename,
+            allow_directory=False,
+            allow_file=True,
+            must_exist=True,
+            operation="load_image",
+            window_title=self.tr("Image Load Error"),
+            message_template=self.tr("The selected image could not be used: {error}"),
+        )
+        if path is None:
             return
-        path = Path(filename)
 
         def _attempt_load() -> None:
             self.original_image = Loader.load_image(str(path))
@@ -955,7 +996,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tr("Failed to load image: {error}").format(error=error),
                 context={
                     "operation": "load_image",
-                    "source": path,
+                    "source": str(path),
                 },
                 window_title=self.tr("Image Load Error"),
                 enable_retry=True,
@@ -976,10 +1017,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.current_preview is None:
             QtWidgets.QMessageBox.warning(self, "Warning", "No extracted image to save.")
             return
-        filename, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Extracted Image", "", "Image Files (*.bmp *.png *.jpg *.tiff *.npy)")
-        if not filename:
+        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Extracted Image", "", "Image Files (*.bmp *.png *.jpg *.tiff *.npy)"
+        )
+        destination = self._sanitize_dialog_path(
+            filename,
+            allow_directory=False,
+            allow_file=True,
+            must_exist=False,
+            operation="save_processed_image",
+            window_title=self.tr("Save Image"),
+            message_template=self.tr("The selected file path could not be used: {error}"),
+        )
+        if destination is None:
             return
-        destination = Path(filename)
 
         def _attempt_save() -> None:
             pipeline_settings = get_extraction_settings_snapshot(self.settings_manager)
@@ -991,7 +1042,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.current_image_path:
                 metadata["source"] = {"input": self.current_image_path}
             result = self.app_core.io_manager.save_image(
-                str(destination),
+                destination,
                 self.current_preview,
                 metadata=metadata,
                 pipeline=pipeline_metadata,
@@ -1010,7 +1061,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tr("Failed to save image: {error}").format(error=error),
                 context={
                     "operation": "save_processed_image",
-                    "destination": destination,
+                    "destination": str(destination),
                 },
                 window_title=self.tr("Save Image"),
                 enable_retry=True,
@@ -1020,42 +1071,53 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
     def mass_extract_folder(self):
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder for Mass Extraction")
-        if not folder:
+        raw_folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Folder for Mass Extraction"
+        )
+        folder_path = self._sanitize_dialog_path(
+            raw_folder,
+            allow_directory=True,
+            allow_file=False,
+            must_exist=True,
+            operation="mass_extract_folder",
+            window_title=self.tr("Mass Extraction"),
+            message_template=self.tr("The selected folder could not be used: {error}"),
+            extra_context={"dialog": "mass_extract"},
+        )
+        if folder_path is None:
             return
-        parent_dir = os.path.dirname(folder)
-        base_folder = os.path.basename(folder)
-        output_folder = os.path.join(parent_dir, base_folder + "_feat")
-        os.makedirs(output_folder, exist_ok=True)
+        output_folder = folder_path.parent / f"{folder_path.name}_feat"
+        output_folder.mkdir(parents=True, exist_ok=True)
         pipeline_settings = get_extraction_settings_snapshot(self.settings_manager)
         pipeline_metadata = _build_extraction_pipeline_metadata(pipeline_settings)
         io_manager = self.app_core.io_manager
         count = 0
-        for file in os.listdir(folder):
-            fullpath = os.path.join(folder, file)
-            if os.path.isfile(fullpath) and os.path.splitext(file)[1].lower() in Config.SUPPORTED_FORMATS:
+        for path in folder_path.iterdir():
+            if path.is_file() and path.suffix.lower() in Config.SUPPORTED_FORMATS:
                 try:
-                    image = Loader.load_image(fullpath)
+                    image = Loader.load_image(str(path))
                     processed = self.pipeline.apply(image)
-                    name, ext = os.path.splitext(file)
-                    image_outpath = os.path.join(output_folder, name + "_feat" + ext)
+                    image_outpath = output_folder / f"{path.stem}_feat{path.suffix}"
                     io_manager.save_image(
                         image_outpath,
                         processed,
                         metadata={
                             "stage": "extraction",
                             "mode": "batch",
-                            "source": {"input": fullpath},
+                            "source": {"input": str(path)},
                         },
                         pipeline=pipeline_metadata,
                         settings_snapshot=pipeline_settings,
                     )
-                    self.export_all_extraction_data(processed, name, output_folder)
+                    self.export_all_extraction_data(processed, path.stem, output_folder)
                     count += 1
                 except Exception as e:
-                    logging.error(f"Failed to process {file}: {e}")
-        QtWidgets.QMessageBox.information(self, "Mass Extraction",
-                                          f"Processed {count} images.\nOutput folder: {output_folder}")
+                    logging.error("Failed to process %s: %s", path.name, e)
+        QtWidgets.QMessageBox.information(
+            self,
+            "Mass Extraction",
+            f"Processed {count} images.\nOutput folder: {output_folder}",
+        )
 
     def export_regions(self):
         if self.original_image is None:
@@ -1113,26 +1175,40 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
     def mass_export_data(self):
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder for Mass Export Extraction Data")
-        if not folder:
+        raw_folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Folder for Mass Export Extraction Data"
+        )
+        folder_path = self._sanitize_dialog_path(
+            raw_folder,
+            allow_directory=True,
+            allow_file=False,
+            must_exist=True,
+            operation="mass_export_data",
+            window_title=self.tr("Mass Export Extraction Data"),
+            message_template=self.tr("The selected folder could not be used: {error}"),
+            extra_context={"dialog": "mass_export_data"},
+        )
+        if folder_path is None:
             return
-        parent_dir = os.path.dirname(folder)
-        base_folder = os.path.basename(folder)
-        output_folder = os.path.join(parent_dir, base_folder + "_data")
-        os.makedirs(output_folder, exist_ok=True)
+        output_folder = folder_path.parent / f"{folder_path.name}_data"
+        output_folder.mkdir(parents=True, exist_ok=True)
         count = 0
-        for file in os.listdir(folder):
-            fullpath = os.path.join(folder, file)
-            if os.path.isfile(fullpath) and os.path.splitext(file)[1].lower() in Config.SUPPORTED_FORMATS:
+        for path in folder_path.iterdir():
+            if path.is_file() and path.suffix.lower() in Config.SUPPORTED_FORMATS:
                 try:
-                    image = Loader.load_image(fullpath)
-                    base_name = os.path.splitext(file)[0]
-                    self.export_all_extraction_data(self.pipeline.apply(image), base_name, output_folder)
+                    image = Loader.load_image(str(path))
+                    base_name = path.stem
+                    self.export_all_extraction_data(
+                        self.pipeline.apply(image), base_name, output_folder
+                    )
                     count += 1
                 except Exception as e:
-                    logging.error(f"Failed to export data for {file}: {e}")
-        QtWidgets.QMessageBox.information(self, "Mass Export Extraction Data",
-                                          f"Exported data for {count} images.\nOutput folder: {output_folder}")
+                    logging.error("Failed to export data for %s: %s", path.name, e)
+        QtWidgets.QMessageBox.information(
+            self,
+            "Mass Export Extraction Data",
+            f"Exported data for {count} images.\nOutput folder: {output_folder}",
+        )
 
     def export_all_extraction_data(self, image: np.ndarray, base_filename: str, output_folder: str):
         order_str = self.settings.value("extraction/order", "")
@@ -1180,10 +1256,20 @@ class MainWindow(QtWidgets.QMainWindow):
             df.to_csv(os.path.join(output_folder, filename), index=False)
 
     def import_settings(self):
-        filename, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import Extraction Settings", "", "JSON Files (*.json)")
-        if not filename:
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Import Extraction Settings", "", "JSON Files (*.json)"
+        )
+        source = self._sanitize_dialog_path(
+            filename,
+            allow_directory=False,
+            allow_file=True,
+            must_exist=True,
+            operation="import_extraction_settings",
+            window_title=self.tr("Settings Import"),
+            message_template=self.tr("The selected file could not be used: {error}"),
+        )
+        if source is None:
             return
-        source = Path(filename)
 
         def _attempt_import() -> None:
             payload = source.read_text(encoding="utf-8")
@@ -1206,7 +1292,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tr("Failed to import extraction settings: {error}").format(error=error),
                 context={
                     "operation": "import_extraction_settings",
-                    "source": source,
+                    "source": str(source),
                 },
                 window_title=self.tr("Settings Import"),
                 enable_retry=True,
@@ -1216,10 +1302,20 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
     def export_settings(self):
-        filename, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export Extraction Settings", "", "JSON Files (*.json)")
-        if not filename:
+        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export Extraction Settings", "", "JSON Files (*.json)"
+        )
+        destination = self._sanitize_dialog_path(
+            filename,
+            allow_directory=False,
+            allow_file=True,
+            must_exist=False,
+            operation="export_extraction_settings",
+            window_title=self.tr("Settings Export"),
+            message_template=self.tr("The selected file path could not be used: {error}"),
+        )
+        if destination is None:
             return
-        destination = Path(filename)
 
         def _attempt_export() -> None:
             payload = self.settings_manager.to_json(
@@ -1237,7 +1333,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tr("Failed to export extraction settings: {error}").format(error=error),
                 context={
                     "operation": "export_extraction_settings",
-                    "destination": destination,
+                    "destination": str(destination),
                 },
                 window_title=self.tr("Settings Export"),
                 enable_retry=True,
