@@ -15,6 +15,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from core.app_core import AppCore
 from core.io_manager import IOManager
+from core.path_sanitizer import PathValidationError, sanitize_user_path
 from core.segmentation import Config, Loader, Preprocessor, parse_bool
 from processing.segmentation_pipeline import (
     PipelineStep,
@@ -1977,13 +1978,53 @@ class MainWindow(QtWidgets.QMainWindow):
                     fallback_traceback=traceback.format_exc(),
                 )
 
+    def _sanitize_dialog_path(
+        self,
+        raw_path: str,
+        *,
+        allow_directory: bool,
+        allow_file: bool,
+        must_exist: bool,
+        operation: str,
+        window_title: str,
+        message_template: str,
+        extra_context: Optional[Dict[str, object]] = None,
+    ) -> Optional[Path]:
+        if not raw_path:
+            return None
+        try:
+            return sanitize_user_path(
+                raw_path,
+                must_exist=must_exist,
+                allow_directory=allow_directory,
+                allow_file=allow_file,
+            )
+        except PathValidationError as exc:
+            context: Dict[str, object] = {"operation": operation, "path": raw_path}
+            if extra_context:
+                context.update(extra_context)
+            self._report_error(
+                message_template.format(error=exc),
+                context=context,
+                window_title=window_title,
+            )
+            return None
+
     def load_image(self):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Load Image", "", "Images (*.png *.jpg *.bmp *.tiff *.npy)"
         )
-        if not filename:
+        path = self._sanitize_dialog_path(
+            filename,
+            allow_directory=False,
+            allow_file=True,
+            must_exist=True,
+            operation="load_image",
+            window_title=self.tr("Image Load Error"),
+            message_template=self.tr("The selected image could not be used: {error}"),
+        )
+        if path is None:
             return
-        path = Path(filename)
 
         def _attempt_load() -> None:
             self.original_image = Loader.load_image(str(path))
@@ -2034,7 +2075,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tr("Failed to load image: {error}").format(error=error),
                 context={
                     "operation": "load_image",
-                    "source": path,
+                    "source": str(path),
                 },
                 window_title=self.tr("Image Load Error"),
                 enable_retry=True,
@@ -2058,9 +2099,17 @@ class MainWindow(QtWidgets.QMainWindow):
         filename, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Save Segmented Image", "", "Image Files (*.bmp *.png *.jpg *.tiff *.npy)"
         )
-        if not filename:
+        destination = self._sanitize_dialog_path(
+            filename,
+            allow_directory=False,
+            allow_file=True,
+            must_exist=False,
+            operation="save_segmented_image",
+            window_title=self.tr("Save Image"),
+            message_template=self.tr("The selected file path could not be used: {error}"),
+        )
+        if destination is None:
             return
-        destination = Path(filename)
         io_manager = self.app_core.io_manager
 
         def _attempt_save() -> None:
@@ -2073,7 +2122,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.current_image_path:
                 metadata["source"] = {"input": self.current_image_path}
             result = io_manager.save_image(
-                str(destination),
+                destination,
                 self.current_preview,
                 metadata=metadata,
                 pipeline=pipeline_metadata,
@@ -2092,7 +2141,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tr("Failed to save image: {error}").format(error=error),
                 context={
                     "operation": "save_segmented_image",
-                    "destination": destination,
+                    "destination": str(destination),
                 },
                 window_title=self.tr("Save Image"),
                 enable_retry=True,
@@ -2102,13 +2151,28 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
     def mass_process(self):
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder for Mass Processing")
-        if not folder:
+        raw_folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Folder for Mass Processing"
+        )
+        folder_path = self._sanitize_dialog_path(
+            raw_folder,
+            allow_directory=True,
+            allow_file=False,
+            must_exist=True,
+            operation="mass_process",
+            window_title=self.tr("Mass Processing"),
+            message_template=self.tr("The selected folder could not be used: {error}"),
+            extra_context={"dialog": "mass_process"},
+        )
+        if folder_path is None:
             return
-        output_folder = os.path.join(folder, "segmented_output")
-        os.makedirs(output_folder, exist_ok=True)
-        files = [f for f in os.listdir(folder)
-                 if os.path.isfile(os.path.join(folder, f)) and os.path.splitext(f)[1].lower() in Config.SUPPORTED_FORMATS]
+        output_folder = folder_path / "segmented_output"
+        output_folder.mkdir(parents=True, exist_ok=True)
+        files = [
+            path
+            for path in folder_path.iterdir()
+            if path.is_file() and path.suffix.lower() in Config.SUPPORTED_FORMATS
+        ]
         if not files:
             QtWidgets.QMessageBox.information(self, "Mass Processing", "No supported image files found in the selected folder.")
             return
@@ -2122,13 +2186,13 @@ class MainWindow(QtWidgets.QMainWindow):
             futures = {
                 executor.submit(
                     process_segmentation_file,
-                    f,
-                    folder,
+                    path.name,
+                    str(folder_path),
                     pipeline_settings,
                     pipeline_metadata,
                     io_preferences,
-                ): f
-                for f in files
+                ): path.name
+                for path in files
             }
             for future in concurrent.futures.as_completed(futures):
                 file, success, err = future.result()
@@ -2142,10 +2206,20 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, "Mass Processing", msg)
 
     def export_pipeline(self):
-        filename, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export Pipeline Settings", "", "JSON Files (*.json)")
-        if not filename:
+        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export Pipeline Settings", "", "JSON Files (*.json)"
+        )
+        destination = self._sanitize_dialog_path(
+            filename,
+            allow_directory=False,
+            allow_file=True,
+            must_exist=False,
+            operation="export_segmentation_pipeline",
+            window_title=self.tr("Export Pipeline"),
+            message_template=self.tr("The selected file path could not be used: {error}"),
+        )
+        if destination is None:
             return
-        destination = Path(filename)
 
         def _attempt_export() -> None:
             payload = self.settings_manager.to_json(
@@ -2163,7 +2237,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tr("Failed to export pipeline: {error}").format(error=error),
                 context={
                     "operation": "export_segmentation_pipeline",
-                    "destination": destination,
+                    "destination": str(destination),
                 },
                 window_title=self.tr("Export Pipeline"),
                 enable_retry=True,
@@ -2173,10 +2247,20 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
     def import_pipeline(self):
-        filename, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import Pipeline Settings", "", "JSON Files (*.json)")
-        if not filename:
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Import Pipeline Settings", "", "JSON Files (*.json)"
+        )
+        source = self._sanitize_dialog_path(
+            filename,
+            allow_directory=False,
+            allow_file=True,
+            must_exist=True,
+            operation="import_segmentation_pipeline",
+            window_title=self.tr("Import Pipeline"),
+            message_template=self.tr("The selected file could not be used: {error}"),
+        )
+        if source is None:
             return
-        source = Path(filename)
 
         def _attempt_import() -> None:
             payload = source.read_text(encoding="utf-8")
@@ -2199,7 +2283,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tr("Failed to import pipeline: {error}").format(error=error),
                 context={
                     "operation": "import_segmentation_pipeline",
-                    "source": source,
+                    "source": str(source),
                 },
                 window_title=self.tr("Import Pipeline"),
                 enable_retry=True,

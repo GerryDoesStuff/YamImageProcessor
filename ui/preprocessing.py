@@ -15,6 +15,7 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from core.app_core import AppCore
+from core.path_sanitizer import PathValidationError, sanitize_user_path
 from core.preprocessing import Config, Loader
 from core.thread_controller import OperationCancelled, ThreadController
 from plugins.module_base import ModuleBase, ModuleStage
@@ -1312,6 +1313,38 @@ class MainWindow(QtWidgets.QMainWindow):
                     fallback_traceback=traceback.format_exc(),
                 )
 
+    def _sanitize_dialog_path(
+        self,
+        raw_path: str,
+        *,
+        allow_directory: bool,
+        allow_file: bool,
+        must_exist: bool,
+        operation: str,
+        window_title: str,
+        message_template: str,
+        extra_context: Optional[Dict[str, object]] = None,
+    ) -> Optional[Path]:
+        if not raw_path:
+            return None
+        try:
+            return sanitize_user_path(
+                raw_path,
+                must_exist=must_exist,
+                allow_directory=allow_directory,
+                allow_file=allow_file,
+            )
+        except PathValidationError as exc:
+            context: Dict[str, object] = {"operation": operation, "path": raw_path}
+            if extra_context:
+                context.update(extra_context)
+            self._report_error(
+                message_template.format(error=exc),
+                context=context,
+                window_title=window_title,
+            )
+            return None
+
     def _activate_module(self, module: ModuleBase) -> None:
         identifier = module.metadata.identifier
         self._update_module_status(identifier, self.tr("Activating"), progress=0.0)
@@ -1685,18 +1718,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Reset all processing to defaults.", 3000)
 
     def mass_preprocess(self):
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder for Mass Pre-Process")
-        if not folder:
+        raw_folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Folder for Mass Pre-Process"
+        )
+        folder_path = self._sanitize_dialog_path(
+            raw_folder,
+            allow_directory=True,
+            allow_file=False,
+            must_exist=True,
+            operation="mass_preprocess",
+            window_title=self.tr("Mass Pre-Process"),
+            message_template=self.tr("The selected folder could not be used: {error}"),
+            extra_context={"dialog": "mass_preprocess"},
+        )
+        if folder_path is None:
             return
-        parent_dir = os.path.dirname(folder)
-        base_folder = os.path.basename(folder)
-        output_folder = os.path.join(parent_dir, base_folder + "_pp")
-        os.makedirs(output_folder, exist_ok=True)
+
+        output_folder = folder_path.parent / f"{folder_path.name}_pp"
+        output_folder.mkdir(parents=True, exist_ok=True)
         files = [
-            os.path.join(folder, file)
-            for file in os.listdir(folder)
-            if os.path.isfile(os.path.join(folder, file))
-            and os.path.splitext(file)[1].lower() in Config.SUPPORTED_FORMATS
+            path
+            for path in folder_path.iterdir()
+            if path.is_file() and path.suffix.lower() in Config.SUPPORTED_FORMATS
         ]
         if not files:
             QtWidgets.QMessageBox.information(
@@ -1731,13 +1774,12 @@ class MainWindow(QtWidgets.QMainWindow):
             for index, path in enumerate(files, start=1):
                 if cancel_event.is_set():
                     raise OperationCancelled()
-                filename = os.path.basename(path)
+                filename = path.name
                 try:
-                    image = Loader.load_image(path)
+                    image = Loader.load_image(str(path))
                     result = pipeline_snapshot.apply(image)
-                    name, ext = os.path.splitext(filename)
-                    new_filename = name + "_pp" + ext
-                    outpath = os.path.join(output_folder, new_filename)
+                    new_filename = f"{path.stem}_pp{path.suffix}"
+                    outpath = output_folder / new_filename
                     io_manager.save_image(
                         outpath,
                         result,
@@ -1745,7 +1787,7 @@ class MainWindow(QtWidgets.QMainWindow):
                             "stage": "preprocessing",
                             "mode": "batch",
                             "source": {
-                                "input": path,
+                                "input": str(path),
                                 "index": index,
                                 "total": total,
                             },
@@ -1785,9 +1827,17 @@ class MainWindow(QtWidgets.QMainWindow):
         filename, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Export Pipeline Settings", "", "JSON Files (*.json)"
         )
-        if not filename:
+        destination = self._sanitize_dialog_path(
+            filename,
+            allow_directory=False,
+            allow_file=True,
+            must_exist=False,
+            operation="export_pipeline",
+            window_title=self.tr("Pipeline Export"),
+            message_template=self.tr("The selected file path could not be used: {error}"),
+        )
+        if destination is None:
             return
-        destination = Path(filename)
 
         def _attempt_export() -> None:
             payload = json.dumps(self.pipeline_manager.to_dict(), indent=2)
@@ -1803,7 +1853,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tr("Failed to export pipeline: {error}").format(error=exc),
                 context={
                     "operation": "export_pipeline",
-                    "destination": destination,
+                    "destination": str(destination),
                 },
                 window_title=self.tr("Pipeline Export"),
                 enable_retry=True,
@@ -1816,9 +1866,17 @@ class MainWindow(QtWidgets.QMainWindow):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Import Pipeline Settings", "", "JSON Files (*.json)"
         )
-        if not filename:
+        source = self._sanitize_dialog_path(
+            filename,
+            allow_directory=False,
+            allow_file=True,
+            must_exist=True,
+            operation="import_pipeline",
+            window_title=self.tr("Pipeline Import"),
+            message_template=self.tr("The selected file could not be used: {error}"),
+        )
+        if source is None:
             return
-        source = Path(filename)
 
         def _attempt_import() -> None:
             payload = source.read_text(encoding="utf-8")
@@ -1858,7 +1916,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tr("Failed to import pipeline: {error}").format(error=exc),
                 context={
                     "operation": "import_pipeline",
-                    "source": source,
+                    "source": str(source),
                 },
                 window_title=self.tr("Pipeline Import"),
                 enable_retry=True,
@@ -1871,9 +1929,17 @@ class MainWindow(QtWidgets.QMainWindow):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Load Image", "", "Image Files (*.jpg *.png *.tiff *.bmp *.npy)"
         )
-        if not filename:
+        path = self._sanitize_dialog_path(
+            filename,
+            allow_directory=False,
+            allow_file=True,
+            must_exist=True,
+            operation="load_image",
+            window_title=self.tr("Image Load Error"),
+            message_template=self.tr("The selected image could not be used: {error}"),
+        )
+        if path is None:
             return
-        path = Path(filename)
 
         def _attempt_load() -> None:
             image = Loader.load_image(str(path))
@@ -1906,7 +1972,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tr("Failed to load image: {error}").format(error=exc),
                 context={
                     "operation": "load_image",
-                    "source": path,
+                    "source": str(path),
                 },
                 window_title=self.tr("Image Load Error"),
                 enable_retry=True,
@@ -1923,30 +1989,40 @@ class MainWindow(QtWidgets.QMainWindow):
         filename, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Save Pre-Processed Image", "", "Image Files (*.jpg *.png *.tiff *.bmp *.npy)"
         )
-        if filename:
-            io_manager = self.app_core.io_manager
-            pipeline_metadata = {"stage": "preprocessing", **self.pipeline_manager.to_dict()}
-            if self._committed_signature is not None:
-                pipeline_metadata["cache_signature"] = self._committed_signature
-            settings_snapshot = self.app_core.settings.snapshot(prefix="preprocess/")
-            metadata: Dict[str, Any] = {
-                "stage": "preprocessing",
-                "mode": "single",
-            }
-            if self.current_image_path:
-                metadata["source"] = {"input": self.current_image_path}
-            if self._committed_signature is not None:
-                metadata["result_signature"] = self._committed_signature
-            if self._last_pipeline_metadata:
-                metadata["cache"] = self._last_pipeline_metadata
-            result = io_manager.save_image(
-                filename,
-                self.committed_image,
-                metadata=metadata,
-                pipeline=pipeline_metadata,
-                settings_snapshot=settings_snapshot,
-            )
-            self.statusBar().showMessage(f"Saved processed image to: {result.image_path}")
+        destination = self._sanitize_dialog_path(
+            filename,
+            allow_directory=False,
+            allow_file=True,
+            must_exist=False,
+            operation="save_processed_image",
+            window_title=self.tr("Save Pre-Processed Image"),
+            message_template=self.tr("The selected file path could not be used: {error}"),
+        )
+        if destination is None:
+            return
+        io_manager = self.app_core.io_manager
+        pipeline_metadata = {"stage": "preprocessing", **self.pipeline_manager.to_dict()}
+        if self._committed_signature is not None:
+            pipeline_metadata["cache_signature"] = self._committed_signature
+        settings_snapshot = self.app_core.settings.snapshot(prefix="preprocess/")
+        metadata: Dict[str, Any] = {
+            "stage": "preprocessing",
+            "mode": "single",
+        }
+        if self.current_image_path:
+            metadata["source"] = {"input": self.current_image_path}
+        if self._committed_signature is not None:
+            metadata["result_signature"] = self._committed_signature
+        if self._last_pipeline_metadata:
+            metadata["cache"] = self._last_pipeline_metadata
+        result = io_manager.save_image(
+            destination,
+            self.committed_image,
+            metadata=metadata,
+            pipeline=pipeline_metadata,
+            settings_snapshot=settings_snapshot,
+        )
+        self.statusBar().showMessage(f"Saved processed image to: {result.image_path}")
 
     def update_preview(self):
         if self.base_image is None or self._source_id is None or self.pipeline is None:

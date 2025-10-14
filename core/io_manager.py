@@ -14,6 +14,12 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 import cv2
 import numpy as np
 
+from .path_sanitizer import (
+    PathValidationError,
+    redact_path_for_metadata,
+    root_index_for_path,
+    sanitize_user_path,
+)
 from .settings import SettingsManager
 
 
@@ -103,7 +109,17 @@ class IOManager:
     ) -> SaveResult:
         """Persist ``image`` and emit a JSON metadata sidecar."""
 
-        path = Path(destination)
+        try:
+            safe_destination = sanitize_user_path(
+                destination,
+                must_exist=False,
+                allow_directory=False,
+                allow_file=True,
+            )
+        except PathValidationError as exc:
+            raise PersistenceError(str(exc)) from exc
+
+        path = Path(safe_destination)
         path, ext = self._resolve_destination(path, format_hint)
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -141,7 +157,16 @@ class IOManager:
     ) -> Tuple[np.ndarray, Optional[Dict[str, Any]]]:
         """Load an image array and optional metadata sidecar."""
 
-        path = Path(source)
+        try:
+            path = sanitize_user_path(
+                source,
+                must_exist=False,
+                allow_directory=False,
+                allow_file=True,
+            )
+        except PathValidationError as exc:
+            raise PersistenceError(str(exc)) from exc
+
         if not path.exists():
             raise FileNotFoundError(path)
         ext = self._normalise_extension(path.suffix)
@@ -228,6 +253,8 @@ class IOManager:
             "image": {
                 "filename": image_path.name,
                 "path": str(image_path),
+                "display_path": redact_path_for_metadata(image_path),
+                "root_index": root_index_for_path(image_path),
                 "format": fmt,
             },
             "metadata": metadata,
