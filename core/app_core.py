@@ -17,6 +17,7 @@ from .thread_controller import ThreadController
 
 from .io_manager import IOManager
 from .persistence import AutosaveManager
+from .recovery import RecoveryManager
 from .settings import SettingsManager
 
 from .logging import init_logging
@@ -62,6 +63,7 @@ class AppCore:
         self.thread_controller: Optional[ThreadController] = None
         self._io_manager: Optional[IOManager] = None
         self.autosave_manager: Optional[AutosaveManager] = None
+        self.recovery_manager: Optional[RecoveryManager] = None
         self._module_catalog: Dict[ModuleStage, Dict[str, ModuleBase]] = {
             stage: {} for stage in ModuleStage
         }
@@ -111,6 +113,10 @@ class AppCore:
             self.autosave_manager.shutdown()
             self.autosave_manager = None
 
+        if self.recovery_manager is not None:
+            self.recovery_manager.cleanup_crash_markers()
+            self.recovery_manager = None
+
         self._pipeline_cache = None
         self._preprocessing_manager = None
         self._preprocessing_templates = {}
@@ -151,6 +157,14 @@ class AppCore:
         if self.autosave_manager is None:
             raise RuntimeError("Autosave manager not initialised. Call bootstrap() first.")
         return self.autosave_manager
+
+    @property
+    def recovery(self) -> RecoveryManager:
+        """Return the crash recovery manager."""
+
+        if self.recovery_manager is None:
+            raise RuntimeError("Recovery manager not initialised. Call bootstrap() first.")
+        return self.recovery_manager
 
     def ensure_bootstrapped(self) -> None:
         """Ensure :meth:`bootstrap` has been executed."""
@@ -273,6 +287,7 @@ class AppCore:
                 else Path.home() / f".{self.config.application.lower()}" / "autosave"
             )
             self.settings_manager.set_autosave_workspace(workspace)
+        workspace = Path(workspace)
 
         autosave_logger = logging.getLogger(f"{__name__}.Autosave")
         self.autosave_manager = AutosaveManager(
@@ -282,9 +297,24 @@ class AppCore:
             interval_seconds=self.settings_manager.autosave_interval(),
             logger=autosave_logger,
         )
+        recovery_logger = logging.getLogger(f"{__name__}.Recovery")
+        self.recovery_manager = RecoveryManager(
+            workspace,
+            recovery_root=self.session_recovery_dir,
+            logger=recovery_logger,
+        )
+        self.recovery_manager.inspect_startup()
         self.logger.debug(
             "Autosave manager initialised",
             extra={"component": "AppCore", "autosave_dir": str(workspace)},
+        )
+        self.logger.debug(
+            "Recovery manager initialised",
+            extra={
+                "component": "AppCore",
+                "autosave_dir": str(workspace),
+                "recovery_root": str(self.session_recovery_dir) if self.session_recovery_dir else None,
+            },
         )
 
     def _discover_plugins(self) -> None:
