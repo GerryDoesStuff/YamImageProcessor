@@ -11,6 +11,7 @@ __all__ = [
     "RecoveryManager",
     "AutosaveSnapshot",
     "CrashMarker",
+    "RecoverySummary",
     "SettingsManager",
 ]
 
@@ -21,6 +22,7 @@ _MODULE_MAP: Dict[str, Tuple[str, str]] = {
     "RecoveryManager": ("core.recovery", "RecoveryManager"),
     "AutosaveSnapshot": ("core.recovery", "AutosaveSnapshot"),
     "CrashMarker": ("core.recovery", "CrashMarker"),
+    "RecoverySummary": ("core.recovery", "RecoverySummary"),
     "SettingsManager": ("core.settings", "SettingsManager"),
 }
 

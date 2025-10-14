@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
-import sys
 
 import pytest
 
@@ -13,9 +12,13 @@ from yam_processor.processing.pipeline_manager import (
     PipelineStep,
 )
 
-if "numpy" in sys.modules and not hasattr(sys.modules["numpy"], "float32"):
-    del sys.modules["numpy"]
-np = importlib.import_module("numpy")
+try:
+    np = importlib.import_module("numpy")
+except ModuleNotFoundError:
+    pytest.skip("numpy is required for pipeline tests", allow_module_level=True)
+
+if not hasattr(np, "float32"):
+    pytest.skip("numpy installation is incomplete", allow_module_level=True)
 
 
 def _add_value(image, *, value: float):

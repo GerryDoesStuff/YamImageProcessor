@@ -308,14 +308,6 @@ class AppCore:
         workspace = Path(workspace)
         self.autosave_workspace = workspace
 
-        autosave_logger = logging.getLogger(f"{__name__}.Autosave")
-        self.autosave_manager = AutosaveManager(
-            self.settings_manager,
-            self._io_manager,
-            autosave_directory=workspace,
-            interval_seconds=self.settings_manager.autosave_interval(),
-            logger=autosave_logger,
-        )
         recovery_logger = logging.getLogger(f"{__name__}.Recovery")
         self.recovery_manager = RecoveryManager(
             workspace,
@@ -323,6 +315,15 @@ class AppCore:
             logger=recovery_logger,
         )
         self.recovery_manager.inspect_startup()
+        autosave_logger = logging.getLogger(f"{__name__}.Autosave")
+        self.autosave_manager = AutosaveManager(
+            self.settings_manager,
+            self._io_manager,
+            autosave_directory=workspace,
+            interval_seconds=self.settings_manager.autosave_interval(),
+            logger=autosave_logger,
+            recovery_manager=self.recovery_manager,
+        )
         self._refresh_allowed_roots()
         self.logger.debug(
             "Autosave manager initialised",
