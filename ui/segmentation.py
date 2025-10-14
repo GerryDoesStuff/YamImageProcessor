@@ -23,6 +23,7 @@ from processing.segmentation_pipeline import (
     build_segmentation_pipeline_from_dict,
     get_settings_snapshot,
 )
+from ui.control_metadata import ControlMetadata, ControlValueType, get_control_metadata
 from ui.theme import (
     SectionWidget,
     ShortcutRegistry,
@@ -31,6 +32,98 @@ from ui.theme import (
     load_icon,
     scale_font,
 )
+
+
+def _apply_common_metadata(widget: QtWidgets.QWidget, metadata: Optional[ControlMetadata]) -> None:
+    if metadata is None:
+        return
+    tooltip = metadata.tooltip_text()
+    if tooltip:
+        widget.setToolTip(tooltip)
+        widget.setWhatsThis(tooltip)
+        widget.setStatusTip(tooltip)
+
+
+def _configure_spinbox(
+    spinbox: QtWidgets.QAbstractSpinBox,
+    module_identifier: str,
+    parameter_name: str,
+    initial_value: Any,
+) -> Any:
+    metadata = get_control_metadata(module_identifier, parameter_name)
+    if metadata is not None:
+        if isinstance(spinbox, QtWidgets.QDoubleSpinBox):
+            if metadata.minimum is not None:
+                spinbox.setMinimum(float(metadata.minimum))
+            if metadata.maximum is not None:
+                spinbox.setMaximum(float(metadata.maximum))
+            if metadata.step is not None:
+                spinbox.setSingleStep(float(metadata.step))
+            if metadata.decimals is not None:
+                spinbox.setDecimals(metadata.decimals)
+        elif isinstance(spinbox, QtWidgets.QSpinBox):
+            if metadata.minimum is not None:
+                spinbox.setMinimum(int(metadata.minimum))
+            if metadata.maximum is not None:
+                spinbox.setMaximum(int(metadata.maximum))
+            if metadata.step is not None:
+                spinbox.setSingleStep(int(metadata.step))
+        coerced_value = metadata.coerce(initial_value)
+        if coerced_value is None:
+            coerced_value = metadata.default
+        if coerced_value is not None:
+            spinbox.setValue(coerced_value)
+        _apply_common_metadata(spinbox, metadata)
+        return coerced_value
+
+    if initial_value is not None:
+        if isinstance(spinbox, QtWidgets.QDoubleSpinBox):
+            spinbox.setValue(float(initial_value))
+        elif isinstance(spinbox, QtWidgets.QSpinBox):
+            spinbox.setValue(int(initial_value))
+    return initial_value
+
+
+def _configure_combobox(
+    combobox: QtWidgets.QComboBox,
+    module_identifier: str,
+    parameter_name: str,
+    initial_value: Any,
+) -> Any:
+    metadata = get_control_metadata(module_identifier, parameter_name)
+    if metadata is not None:
+        combobox.blockSignals(True)
+        try:
+            if metadata.choices:
+                combobox.clear()
+                for option in metadata.choices:
+                    combobox.addItem(option.label, option.value)
+                    if option.description:
+                        combobox.setItemData(
+                            combobox.count() - 1, option.description, QtCore.Qt.ToolTipRole
+                        )
+            value_to_set = metadata.coerce(initial_value)
+            if value_to_set is None:
+                value_to_set = metadata.default
+            if value_to_set is not None:
+                index = combobox.findData(value_to_set)
+                if index == -1 and isinstance(value_to_set, str):
+                    index = combobox.findText(value_to_set)
+                if index >= 0:
+                    combobox.setCurrentIndex(index)
+        finally:
+            combobox.blockSignals(False)
+        _apply_common_metadata(combobox, metadata)
+        current_data = combobox.currentData(QtCore.Qt.UserRole)
+        if current_data is not None and metadata.value_type is not ControlValueType.STRING:
+            return current_data
+        if current_data is not None:
+            return current_data
+        return combobox.currentText()
+
+    if initial_value is not None:
+        combobox.setCurrentText(str(initial_value))
+    return combobox.currentText()
 
 
 def _build_segmentation_pipeline_metadata(settings: Mapping[str, Any]) -> Dict[str, Any]:
@@ -137,12 +230,13 @@ class GlobalThresholdDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Global Threshold Parameters")
         self.preview_callback = preview_callback
-        self.initial_threshold = threshold
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.threshold_spin = QtWidgets.QSpinBox()
-        self.threshold_spin.setRange(0,255)
-        self.threshold_spin.setValue(threshold)
+        threshold = _configure_spinbox(
+            self.threshold_spin, "GlobalThreshold", "threshold", threshold
+        )
+        self.initial_threshold = threshold if threshold is not None else 127
         form_layout.addRow("Threshold:", self.threshold_spin)
         layout.addLayout(form_layout)
         btn_layout = QtWidgets.QHBoxLayout()
@@ -181,17 +275,16 @@ class AdaptiveThresholdDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Adaptive Threshold Parameters")
         self.preview_callback = preview_callback
-        self.initial_block_size = block_size
-        self.initial_C = C
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.block_size_spin = QtWidgets.QSpinBox()
-        self.block_size_spin.setRange(3,101)
-        self.block_size_spin.setSingleStep(2)
-        self.block_size_spin.setValue(block_size)
+        block_size = _configure_spinbox(
+            self.block_size_spin, "AdaptiveThreshold", "block_size", block_size
+        )
+        self.initial_block_size = block_size if block_size is not None else 11
         self.C_spin = QtWidgets.QSpinBox()
-        self.C_spin.setRange(-10,10)
-        self.C_spin.setValue(C)
+        C = _configure_spinbox(self.C_spin, "AdaptiveThreshold", "C", C)
+        self.initial_C = C if C is not None else 2
         form_layout.addRow("Block Size:", self.block_size_spin)
         form_layout.addRow("C:", self.C_spin)
         layout.addLayout(form_layout)
@@ -216,21 +309,23 @@ class EdgeBasedSegmentationDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Edge-based Segmentation Parameters")
         self.preview_callback = preview_callback
-        self.initial_low = low_threshold
-        self.initial_high = high_threshold
-        self.initial_aperture = aperture_size
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.low_spin = QtWidgets.QSpinBox()
-        self.low_spin.setRange(0,255)
-        self.low_spin.setValue(low_threshold)
+        low_threshold = _configure_spinbox(
+            self.low_spin, "EdgeBasedSegmentation", "low_threshold", low_threshold
+        )
+        self.initial_low = low_threshold if low_threshold is not None else 50
         self.high_spin = QtWidgets.QSpinBox()
-        self.high_spin.setRange(0,255)
-        self.high_spin.setValue(high_threshold)
+        high_threshold = _configure_spinbox(
+            self.high_spin, "EdgeBasedSegmentation", "high_threshold", high_threshold
+        )
+        self.initial_high = high_threshold if high_threshold is not None else 150
         self.aperture_spin = QtWidgets.QSpinBox()
-        self.aperture_spin.setRange(3,7)
-        self.aperture_spin.setSingleStep(2)
-        self.aperture_spin.setValue(aperture_size)
+        aperture_size = _configure_spinbox(
+            self.aperture_spin, "EdgeBasedSegmentation", "aperture_size", aperture_size
+        )
+        self.initial_aperture = aperture_size if aperture_size is not None else 3
         form_layout.addRow("Low Threshold:", self.low_spin)
         form_layout.addRow("High Threshold:", self.high_spin)
         form_layout.addRow("Aperture Size:", self.aperture_spin)
@@ -258,25 +353,28 @@ class WatershedDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Watershed Segmentation Parameters")
         self.preview_callback = preview_callback
-        self.initial_kernel = kernel_size
-        self.initial_opening = opening_iterations
-        self.initial_dilation = dilation_iterations
-        self.initial_factor = distance_threshold_factor
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.kernel_spin = QtWidgets.QSpinBox()
-        self.kernel_spin.setRange(1,15)
-        self.kernel_spin.setValue(kernel_size)
+        kernel_size = _configure_spinbox(self.kernel_spin, "Watershed", "kernel_size", kernel_size)
+        self.initial_kernel = kernel_size if kernel_size is not None else 3
         self.opening_spin = QtWidgets.QSpinBox()
-        self.opening_spin.setRange(1,10)
-        self.opening_spin.setValue(opening_iterations)
+        opening_iterations = _configure_spinbox(
+            self.opening_spin, "Watershed", "opening_iterations", opening_iterations
+        )
+        self.initial_opening = opening_iterations if opening_iterations is not None else 2
         self.dilation_spin = QtWidgets.QSpinBox()
-        self.dilation_spin.setRange(1,10)
-        self.dilation_spin.setValue(dilation_iterations)
+        dilation_iterations = _configure_spinbox(
+            self.dilation_spin, "Watershed", "dilation_iterations", dilation_iterations
+        )
+        self.initial_dilation = dilation_iterations if dilation_iterations is not None else 3
         self.factor_spin = QtWidgets.QDoubleSpinBox()
-        self.factor_spin.setRange(0.1,1.0)
-        self.factor_spin.setSingleStep(0.1)
-        self.factor_spin.setValue(distance_threshold_factor)
+        distance_threshold_factor = _configure_spinbox(
+            self.factor_spin, "Watershed", "distance_threshold_factor", distance_threshold_factor
+        )
+        self.initial_factor = (
+            distance_threshold_factor if distance_threshold_factor is not None else 0.7
+        )
         form_layout.addRow("Kernel Size:", self.kernel_spin)
         form_layout.addRow("Opening Iterations:", self.opening_spin)
         form_layout.addRow("Dilation Iterations:", self.dilation_spin)
@@ -307,13 +405,11 @@ class SobelDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Sobel Operator Parameters")
         self.preview_callback = preview_callback
-        self.initial_ksize = ksize if ksize % 2 == 1 else ksize+1
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.ksize_spin = QtWidgets.QSpinBox()
-        self.ksize_spin.setRange(1,31)
-        self.ksize_spin.setSingleStep(2)
-        self.ksize_spin.setValue(self.initial_ksize)
+        ksize = _configure_spinbox(self.ksize_spin, "Sobel", "ksize", ksize)
+        self.initial_ksize = ksize if ksize is not None else 3
         form_layout.addRow("Kernel Size (odd):", self.ksize_spin)
         layout.addLayout(form_layout)
         btn_layout = QtWidgets.QHBoxLayout()
@@ -352,13 +448,11 @@ class LaplacianDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Laplacian Operator Parameters")
         self.preview_callback = preview_callback
-        self.initial_ksize = ksize if ksize % 2 == 1 else ksize+1
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.ksize_spin = QtWidgets.QSpinBox()
-        self.ksize_spin.setRange(1,31)
-        self.ksize_spin.setSingleStep(2)
-        self.ksize_spin.setValue(self.initial_ksize)
+        ksize = _configure_spinbox(self.ksize_spin, "Laplacian", "ksize", ksize)
+        self.initial_ksize = ksize if ksize is not None else 3
         form_layout.addRow("Kernel Size (odd):", self.ksize_spin)
         layout.addLayout(form_layout)
         btn_layout = QtWidgets.QHBoxLayout()
@@ -380,20 +474,19 @@ class RegionGrowingDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Region Growing Parameters")
         self.preview_callback = preview_callback
-        self.initial_seed_x = seed_x
-        self.initial_seed_y = seed_y
-        self.initial_tolerance = tolerance
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.seed_x_spin = QtWidgets.QSpinBox()
-        self.seed_x_spin.setRange(0,1000)
-        self.seed_x_spin.setValue(seed_x)
+        seed_x = _configure_spinbox(self.seed_x_spin, "RegionGrowing", "seed_x", seed_x)
+        self.initial_seed_x = seed_x if seed_x is not None else 50
         self.seed_y_spin = QtWidgets.QSpinBox()
-        self.seed_y_spin.setRange(0,1000)
-        self.seed_y_spin.setValue(seed_y)
+        seed_y = _configure_spinbox(self.seed_y_spin, "RegionGrowing", "seed_y", seed_y)
+        self.initial_seed_y = seed_y if seed_y is not None else 50
         self.tolerance_spin = QtWidgets.QSpinBox()
-        self.tolerance_spin.setRange(0,100)
-        self.tolerance_spin.setValue(tolerance)
+        tolerance = _configure_spinbox(
+            self.tolerance_spin, "RegionGrowing", "tolerance", tolerance
+        )
+        self.initial_tolerance = tolerance if tolerance is not None else 10
         form_layout.addRow("Seed X:", self.seed_x_spin)
         form_layout.addRow("Seed Y:", self.seed_y_spin)
         form_layout.addRow("Tolerance:", self.tolerance_spin)
@@ -421,17 +514,18 @@ class RegionSplittingMergingDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Region Splitting/Merging Parameters")
         self.preview_callback = preview_callback
-        self.initial_min_size = min_size
-        self.initial_std_thresh = std_thresh
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.min_size_spin = QtWidgets.QSpinBox()
-        self.min_size_spin.setRange(1,1000)
-        self.min_size_spin.setValue(min_size)
+        min_size = _configure_spinbox(
+            self.min_size_spin, "RegionSplittingMerging", "min_size", min_size
+        )
+        self.initial_min_size = min_size if min_size is not None else 16
         self.std_thresh_spin = QtWidgets.QDoubleSpinBox()
-        self.std_thresh_spin.setRange(0.1,100)
-        self.std_thresh_spin.setSingleStep(0.5)
-        self.std_thresh_spin.setValue(std_thresh)
+        std_thresh = _configure_spinbox(
+            self.std_thresh_spin, "RegionSplittingMerging", "std_thresh", std_thresh
+        )
+        self.initial_std_thresh = std_thresh if std_thresh is not None else 10.0
         form_layout.addRow("Minimum Region Size:", self.min_size_spin)
         form_layout.addRow("Std. Deviation Threshold:", self.std_thresh_spin)
         layout.addLayout(form_layout)
@@ -456,16 +550,14 @@ class KMeansSegmentationDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("K-Means Segmentation Parameters")
         self.preview_callback = preview_callback
-        self.initial_K = K
-        self.initial_seed = seed
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.K_spin = QtWidgets.QSpinBox()
-        self.K_spin.setRange(2,10)
-        self.K_spin.setValue(K)
+        K = _configure_spinbox(self.K_spin, "KMeans", "K", K)
+        self.initial_K = K if K is not None else 2
         self.seed_spin = QtWidgets.QSpinBox()
-        self.seed_spin.setRange(0,10000)
-        self.seed_spin.setValue(seed)
+        seed = _configure_spinbox(self.seed_spin, "KMeans", "seed", seed)
+        self.initial_seed = seed if seed is not None else 42
         form_layout.addRow("Number of Clusters (K):", self.K_spin)
         form_layout.addRow("Seed:", self.seed_spin)
         layout.addLayout(form_layout)
@@ -490,16 +582,14 @@ class FuzzyCMeansDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Fuzzy C-Means Segmentation Parameters")
         self.preview_callback = preview_callback
-        self.initial_K = K
-        self.initial_seed = seed
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.K_spin = QtWidgets.QSpinBox()
-        self.K_spin.setRange(2,10)
-        self.K_spin.setValue(K)
+        K = _configure_spinbox(self.K_spin, "FuzzyCMeans", "K", K)
+        self.initial_K = K if K is not None else 2
         self.seed_spin = QtWidgets.QSpinBox()
-        self.seed_spin.setRange(0,10000)
-        self.seed_spin.setValue(seed)
+        seed = _configure_spinbox(self.seed_spin, "FuzzyCMeans", "seed", seed)
+        self.initial_seed = seed if seed is not None else 42
         form_layout.addRow("Number of Clusters (K):", self.K_spin)
         form_layout.addRow("Seed:", self.seed_spin)
         layout.addLayout(form_layout)
@@ -524,16 +614,18 @@ class MeanShiftDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Mean Shift Segmentation Parameters")
         self.preview_callback = preview_callback
-        self.initial_spatial = spatial_radius
-        self.initial_color = color_radius
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.spatial_spin = QtWidgets.QSpinBox()
-        self.spatial_spin.setRange(1,100)
-        self.spatial_spin.setValue(spatial_radius)
+        spatial_radius = _configure_spinbox(
+            self.spatial_spin, "MeanShift", "spatial_radius", spatial_radius
+        )
+        self.initial_spatial = spatial_radius if spatial_radius is not None else 20
         self.color_spin = QtWidgets.QSpinBox()
-        self.color_spin.setRange(1,100)
-        self.color_spin.setValue(color_radius)
+        color_radius = _configure_spinbox(
+            self.color_spin, "MeanShift", "color_radius", color_radius
+        )
+        self.initial_color = color_radius if color_radius is not None else 30
         form_layout.addRow("Spatial Radius:", self.spatial_spin)
         form_layout.addRow("Color Radius:", self.color_spin)
         layout.addLayout(form_layout)
@@ -558,16 +650,14 @@ class GMMDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("GMM Segmentation Parameters")
         self.preview_callback = preview_callback
-        self.initial_components = components
-        self.initial_seed = seed
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.comp_spin = QtWidgets.QSpinBox()
-        self.comp_spin.setRange(2,10)
-        self.comp_spin.setValue(components)
+        components = _configure_spinbox(self.comp_spin, "GMM", "components", components)
+        self.initial_components = components if components is not None else 2
         self.seed_spin = QtWidgets.QSpinBox()
-        self.seed_spin.setRange(0,10000)
-        self.seed_spin.setValue(seed)
+        seed = _configure_spinbox(self.seed_spin, "GMM", "seed", seed)
+        self.initial_seed = seed if seed is not None else 42
         form_layout.addRow("Components:", self.comp_spin)
         form_layout.addRow("Seed:", self.seed_spin)
         layout.addLayout(form_layout)
@@ -609,26 +699,22 @@ class ActiveContourDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Active Contour Parameters")
         self.preview_callback = preview_callback
-        self.initial_iterations = iterations
-        self.initial_alpha = alpha
-        self.initial_beta = beta
-        self.initial_gamma = gamma
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.iter_spin = QtWidgets.QSpinBox()
-        self.iter_spin.setRange(50,1000)
-        self.iter_spin.setValue(iterations)
+        iterations = _configure_spinbox(
+            self.iter_spin, "ActiveContour", "iterations", iterations
+        )
+        self.initial_iterations = iterations if iterations is not None else 250
         self.alpha_spin = QtWidgets.QDoubleSpinBox()
-        self.alpha_spin.setRange(0.001,0.1)
-        self.alpha_spin.setSingleStep(0.001)
-        self.alpha_spin.setValue(alpha)
+        alpha = _configure_spinbox(self.alpha_spin, "ActiveContour", "alpha", alpha)
+        self.initial_alpha = alpha if alpha is not None else 0.015
         self.beta_spin = QtWidgets.QDoubleSpinBox()
-        self.beta_spin.setRange(1,20)
-        self.beta_spin.setValue(beta)
+        beta = _configure_spinbox(self.beta_spin, "ActiveContour", "beta", beta)
+        self.initial_beta = beta if beta is not None else 10.0
         self.gamma_spin = QtWidgets.QDoubleSpinBox()
-        self.gamma_spin.setRange(0.0001,0.01)
-        self.gamma_spin.setSingleStep(0.0001)
-        self.gamma_spin.setValue(gamma)
+        gamma = _configure_spinbox(self.gamma_spin, "ActiveContour", "gamma", gamma)
+        self.initial_gamma = gamma if gamma is not None else 0.001
         form_layout.addRow("Iterations:", self.iter_spin)
         form_layout.addRow("Alpha:", self.alpha_spin)
         form_layout.addRow("Beta:", self.beta_spin)
@@ -659,20 +745,17 @@ class OpeningDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Opening Parameters")
         self.preview_callback = preview_callback
-        self.initial_kernel_shape = kernel_shape
-        self.initial_kernel_size = kernel_size
-        self.initial_iterations = iterations
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.kernel_shape_combo = QtWidgets.QComboBox()
-        self.kernel_shape_combo.addItems(["Rectangular", "Elliptical", "Cross"])
-        self.kernel_shape_combo.setCurrentText(kernel_shape)
+        kernel_shape = _configure_combobox(self.kernel_shape_combo, "Opening", "kernel_shape", kernel_shape)
+        self.initial_kernel_shape = kernel_shape if kernel_shape is not None else "Rectangular"
         self.kernel_size_spin = QtWidgets.QSpinBox()
-        self.kernel_size_spin.setRange(1,31)
-        self.kernel_size_spin.setValue(kernel_size)
+        kernel_size = _configure_spinbox(self.kernel_size_spin, "Opening", "kernel_size", kernel_size)
+        self.initial_kernel_size = kernel_size if kernel_size is not None else 3
         self.iterations_spin = QtWidgets.QSpinBox()
-        self.iterations_spin.setRange(1,10)
-        self.iterations_spin.setValue(iterations)
+        iterations = _configure_spinbox(self.iterations_spin, "Opening", "iterations", iterations)
+        self.initial_iterations = iterations if iterations is not None else 1
         form_layout.addRow("Kernel Shape:", self.kernel_shape_combo)
         form_layout.addRow("Kernel Size:", self.kernel_size_spin)
         form_layout.addRow("Iterations:", self.iterations_spin)
@@ -700,20 +783,17 @@ class ClosingDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Closing Parameters")
         self.preview_callback = preview_callback
-        self.initial_kernel_shape = kernel_shape
-        self.initial_kernel_size = kernel_size
-        self.initial_iterations = iterations
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.kernel_shape_combo = QtWidgets.QComboBox()
-        self.kernel_shape_combo.addItems(["Rectangular", "Elliptical", "Cross"])
-        self.kernel_shape_combo.setCurrentText(kernel_shape)
+        kernel_shape = _configure_combobox(self.kernel_shape_combo, "Closing", "kernel_shape", kernel_shape)
+        self.initial_kernel_shape = kernel_shape if kernel_shape is not None else "Rectangular"
         self.kernel_size_spin = QtWidgets.QSpinBox()
-        self.kernel_size_spin.setRange(1,31)
-        self.kernel_size_spin.setValue(kernel_size)
+        kernel_size = _configure_spinbox(self.kernel_size_spin, "Closing", "kernel_size", kernel_size)
+        self.initial_kernel_size = kernel_size if kernel_size is not None else 3
         self.iterations_spin = QtWidgets.QSpinBox()
-        self.iterations_spin.setRange(1,10)
-        self.iterations_spin.setValue(iterations)
+        iterations = _configure_spinbox(self.iterations_spin, "Closing", "iterations", iterations)
+        self.initial_iterations = iterations if iterations is not None else 1
         form_layout.addRow("Kernel Shape:", self.kernel_shape_combo)
         form_layout.addRow("Kernel Size:", self.kernel_size_spin)
         form_layout.addRow("Iterations:", self.iterations_spin)
@@ -741,20 +821,17 @@ class DilationDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Dilation Parameters")
         self.preview_callback = preview_callback
-        self.initial_kernel_shape = kernel_shape
-        self.initial_kernel_size = kernel_size
-        self.initial_iterations = iterations
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.kernel_shape_combo = QtWidgets.QComboBox()
-        self.kernel_shape_combo.addItems(["Rectangular", "Elliptical", "Cross"])
-        self.kernel_shape_combo.setCurrentText(kernel_shape)
+        kernel_shape = _configure_combobox(self.kernel_shape_combo, "Dilation", "kernel_shape", kernel_shape)
+        self.initial_kernel_shape = kernel_shape if kernel_shape is not None else "Rectangular"
         self.kernel_size_spin = QtWidgets.QSpinBox()
-        self.kernel_size_spin.setRange(1,31)
-        self.kernel_size_spin.setValue(kernel_size)
+        kernel_size = _configure_spinbox(self.kernel_size_spin, "Dilation", "kernel_size", kernel_size)
+        self.initial_kernel_size = kernel_size if kernel_size is not None else 3
         self.iterations_spin = QtWidgets.QSpinBox()
-        self.iterations_spin.setRange(1,10)
-        self.iterations_spin.setValue(iterations)
+        iterations = _configure_spinbox(self.iterations_spin, "Dilation", "iterations", iterations)
+        self.initial_iterations = iterations if iterations is not None else 1
         form_layout.addRow("Kernel Shape:", self.kernel_shape_combo)
         form_layout.addRow("Kernel Size:", self.kernel_size_spin)
         form_layout.addRow("Iterations:", self.iterations_spin)
@@ -782,20 +859,17 @@ class ErosionDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Erosion Parameters")
         self.preview_callback = preview_callback
-        self.initial_kernel_shape = kernel_shape
-        self.initial_kernel_size = kernel_size
-        self.initial_iterations = iterations
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.kernel_shape_combo = QtWidgets.QComboBox()
-        self.kernel_shape_combo.addItems(["Rectangular", "Elliptical", "Cross"])
-        self.kernel_shape_combo.setCurrentText(kernel_shape)
+        kernel_shape = _configure_combobox(self.kernel_shape_combo, "Erosion", "kernel_shape", kernel_shape)
+        self.initial_kernel_shape = kernel_shape if kernel_shape is not None else "Rectangular"
         self.kernel_size_spin = QtWidgets.QSpinBox()
-        self.kernel_size_spin.setRange(1,31)
-        self.kernel_size_spin.setValue(kernel_size)
+        kernel_size = _configure_spinbox(self.kernel_size_spin, "Erosion", "kernel_size", kernel_size)
+        self.initial_kernel_size = kernel_size if kernel_size is not None else 3
         self.iterations_spin = QtWidgets.QSpinBox()
-        self.iterations_spin.setRange(1,10)
-        self.iterations_spin.setValue(iterations)
+        iterations = _configure_spinbox(self.iterations_spin, "Erosion", "iterations", iterations)
+        self.initial_iterations = iterations if iterations is not None else 1
         form_layout.addRow("Kernel Shape:", self.kernel_shape_combo)
         form_layout.addRow("Kernel Size:", self.kernel_size_spin)
         form_layout.addRow("Iterations:", self.iterations_spin)
@@ -823,12 +897,13 @@ class BorderRemovalDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Border Removal Parameters")
         self.preview_callback = preview_callback
-        self.initial_border_distance = border_distance
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
         self.border_spin = QtWidgets.QSpinBox()
-        self.border_spin.setRange(0,999)
-        self.border_spin.setValue(border_distance)
+        border_distance = _configure_spinbox(
+            self.border_spin, "BorderRemoval", "border_distance", border_distance
+        )
+        self.initial_border_distance = border_distance if border_distance is not None else 100
         form_layout.addRow("Border Distance (pixels):", self.border_spin)
         layout.addLayout(form_layout)
         btn_layout = QtWidgets.QHBoxLayout()

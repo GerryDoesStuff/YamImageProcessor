@@ -4,7 +4,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Iterable, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence, Tuple
 
 import numpy as np
 
@@ -12,6 +12,7 @@ from processing.pipeline_manager import PipelineStep
 
 if TYPE_CHECKING:  # pragma: no cover - only used for typing
     from ui.preprocessing import MainWindow
+    from ui.control_metadata import ControlMetadata
 
 
 class ModuleStage(Enum):
@@ -63,6 +64,18 @@ class ModuleBase(ABC):
     def _build_metadata(self) -> ModuleMetadata:
         """Construct the immutable metadata descriptor for the module."""
 
+    def _load_parameter_metadata(self) -> Mapping[str, "ControlMetadata"]:
+        try:
+            from ui.control_metadata import get_module_control_metadata
+        except Exception:  # pragma: no cover - defensive fallback
+            return {}
+        return get_module_control_metadata(self.metadata.identifier)
+
+    def parameter_metadata(self) -> Mapping[str, "ControlMetadata"]:
+        """Return the registered control metadata for this module, if any."""
+
+        return self._load_parameter_metadata()
+
     # ------------------------------------------------------------------
     # Menu registration helpers
     def menu_entries(self) -> Sequence[MenuEntry]:
@@ -90,7 +103,21 @@ class ModuleBase(ABC):
     def default_parameters(self) -> dict[str, Any]:
         """Return the default parameters for the module's pipeline step."""
 
-        return {}
+        defaults: dict[str, Any] = {}
+        for name, metadata in self.parameter_metadata().items():
+            if metadata.default is not None:
+                defaults[name] = metadata.default
+        return defaults
+
+    def sanitize_parameters(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """Normalise ``params`` using the metadata registry where available."""
+
+        sanitised: dict[str, Any] = dict(self.default_parameters())
+        sanitised.update(params)
+        for name, metadata in self.parameter_metadata().items():
+            if name in sanitised:
+                sanitised[name] = metadata.coerce(sanitised[name])
+        return sanitised
 
     def create_pipeline_step(self) -> PipelineStep:
         """Create a :class:`PipelineStep` template for this module."""

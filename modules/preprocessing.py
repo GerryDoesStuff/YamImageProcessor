@@ -40,12 +40,10 @@ class BrightnessContrastModule(ModuleBase):
             description="Adjust overall brightness and contrast levels.",
         )
 
-    def default_parameters(self) -> dict[str, Any]:
-        return {"alpha": 1.0, "beta": 0}
-
     def process(self, image: np.ndarray, **kwargs: Any) -> np.ndarray:
-        alpha = float(kwargs.get("alpha", 1.0))
-        beta = float(kwargs.get("beta", 0))
+        params = self.sanitize_parameters(kwargs)
+        alpha = float(params.get("alpha", 1.0))
+        beta = float(params.get("beta", 0))
         if alpha <= 0:
             raise ValueError("Alpha must be > 0")
         return cv2.convertScaleAbs(image, alpha=alpha, beta=beta)
@@ -65,11 +63,9 @@ class GammaCorrectionModule(ModuleBase):
             description="Apply gamma correction to the image intensities.",
         )
 
-    def default_parameters(self) -> dict[str, Any]:
-        return {"gamma": 1.0}
-
     def process(self, image: np.ndarray, **kwargs: Any) -> np.ndarray:
-        gamma = float(kwargs.get("gamma", 1.0))
+        params = self.sanitize_parameters(kwargs)
+        gamma = float(params.get("gamma", 1.0))
         if gamma <= 0:
             raise ValueError("Gamma must be > 0")
         inv_gamma = 1.0 / gamma
@@ -91,12 +87,10 @@ class IntensityNormalizationModule(ModuleBase):
             description="Stretch intensities into the specified range.",
         )
 
-    def default_parameters(self) -> dict[str, Any]:
-        return {"alpha": 0, "beta": 255}
-
     def process(self, image: np.ndarray, **kwargs: Any) -> np.ndarray:
-        alpha = float(kwargs.get("alpha", 0))
-        beta = float(kwargs.get("beta", 255))
+        params = self.sanitize_parameters(kwargs)
+        alpha = float(params.get("alpha", 0))
+        beta = float(params.get("beta", 255))
         return cv2.normalize(image, None, alpha, beta, cv2.NORM_MINMAX)
 
     def activate(self, window) -> None:  # type: ignore[override]
@@ -114,14 +108,10 @@ class NoiseReductionModule(ModuleBase):
             description="Apply Gaussian, median, or bilateral denoising.",
         )
 
-    def default_parameters(self) -> dict[str, Any]:
-        return {"method": "Gaussian", "ksize": 5}
-
     def process(self, image: np.ndarray, **kwargs: Any) -> np.ndarray:
-        method = str(kwargs.get("method", "Gaussian"))
-        ksize = int(kwargs.get("ksize", 5))
-        if ksize % 2 == 0:
-            ksize += 1
+        params = self.sanitize_parameters(kwargs)
+        method = str(params.get("method", "Gaussian"))
+        ksize = int(params.get("ksize", 5))
         if method == "Gaussian":
             return cv2.GaussianBlur(image, (ksize, ksize), 0)
         if method == "Median":
@@ -145,11 +135,9 @@ class SharpenModule(ModuleBase):
             description="Enhance edges using a configurable strength.",
         )
 
-    def default_parameters(self) -> dict[str, Any]:
-        return {"strength": 1.0}
-
     def process(self, image: np.ndarray, **kwargs: Any) -> np.ndarray:
-        strength = float(kwargs.get("strength", 1.0))
+        params = self.sanitize_parameters(kwargs)
+        strength = float(params.get("strength", 1.0))
         blurred = cv2.GaussianBlur(image, (0, 0), sigmaX=3)
         return cv2.addWeighted(image, 1 + strength, blurred, -strength, 0)
 
@@ -168,11 +156,9 @@ class SelectChannelModule(ModuleBase):
             description="Extract or combine specific colour channels.",
         )
 
-    def default_parameters(self) -> dict[str, Any]:
-        return {"channel": "All"}
-
     def process(self, image: np.ndarray, **kwargs: Any) -> np.ndarray:
-        channel = str(kwargs.get("channel", "All"))
+        params = self.sanitize_parameters(kwargs)
+        channel = str(params.get("channel", "All"))
         working = image
         if working.ndim == 2:
             working = cv2.cvtColor(working, cv2.COLOR_GRAY2BGR)
@@ -208,21 +194,13 @@ class CropModule(ModuleBase):
             description="Crop to a region of interest or preview the crop.",
         )
 
-    def default_parameters(self) -> dict[str, Any]:
-        return {
-            "x_offset": 0,
-            "y_offset": 0,
-            "width": 100,
-            "height": 100,
-            "apply_crop": False,
-        }
-
     def process(self, image: np.ndarray, **kwargs: Any) -> np.ndarray:
-        x_offset = int(kwargs.get("x_offset", 0))
-        y_offset = int(kwargs.get("y_offset", 0))
-        width = int(kwargs.get("width", 100))
-        height = int(kwargs.get("height", 100))
-        apply_crop = bool(kwargs.get("apply_crop", False))
+        params = self.sanitize_parameters(kwargs)
+        x_offset = int(params.get("x_offset", 0))
+        y_offset = int(params.get("y_offset", 0))
+        width = int(params.get("width", 100))
+        height = int(params.get("height", 100))
+        apply_crop = bool(params.get("apply_crop", False))
         if not apply_crop:
             overlay = image.copy()
             cv2.rectangle(
