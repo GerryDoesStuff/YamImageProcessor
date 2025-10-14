@@ -134,3 +134,46 @@ widgets:
 Adhering to these conventions ensures that accessibility settings remain
 predictable for keyboard and screen-reader users while keeping the UI visually
 coherent with the rest of the application.
+
+## Recovery procedures
+
+`yam_processor.core.recovery.RecoveryManager` coordinates every part of the
+autosave and crash-recovery lifecycle. When you introduce a new bootstrapping
+path or extend `AppCore`, ensure that `inspect_startup()` is called once the
+autosave directory is known so the manager can discover pending snapshots before
+the UI begins rendering. If you defer the main window or require additional
+context (e.g., a wizard that prepares settings), call `prompt_pending()` once a
+`QApplication` exists and the relevant parent widget can host the dialog. The
+method safely no-ops when no autosave is queued, so it is inexpensive to invoke
+from multiple entry points.
+
+Pipeline components or tools that bypass the standard startup should still
+respect discard and restore flows:
+
+- Use `has_pending_autosave()` to gate features that would overwrite user work.
+- Provide an explicit discard path (e.g., a “Forget autosave” action) that
+  delegates to `discard_pending()` so artefacts are removed consistently.
+- When a restore completes successfully, honour the payload returned from
+  `prompt_pending()`/`inspect_startup()` and immediately clear transient crash
+  banners in your UI.
+
+Crash markers are managed by the recovery manager to communicate pipeline
+failures across processes. After a successful save, export, or job rerun, call
+`cleanup_crash_markers()` so follow-up dialogs no longer present stale recovery
+warnings. This is especially important for headless runners or background
+workers that record their own autosave metadata.
+
+All recovery surfaces must emit structured logs. Use the component-aware
+loggers (`extra={"component": "RecoveryManager"}` or a module-specific value)
+when logging state transitions, and include the autosave paths or identifiers in
+the metadata payload. New dialogs should be wired through
+`present_error_report()` or the shared error-reporting helpers so that retry and
+discard buttons map onto `RecoveryManager` callbacks automatically and so that
+any telemetry/error reporters capture the same structured payload. This ensures
+that contributors adding new modules respect the established recovery workflow
+without duplicating bespoke dialogs.
+
+For deeper validation steps, follow the manual QA checklist in
+[`docs/manual_qa_recovery.md`](manual_qa_recovery.md). It exercises the
+structured dialog prompts, discard/restore flows, and crash-marker cleanup to
+confirm integrations behave as expected.
