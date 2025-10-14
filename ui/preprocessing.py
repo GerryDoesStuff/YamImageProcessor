@@ -23,6 +23,7 @@ from processing.preprocessing_pipeline import (
     PreprocessingPipeline,
     build_preprocessing_pipeline,
 )
+from ui.control_metadata import ControlMetadata, ControlValueType, get_control_metadata
 from ui.theme import (
     SectionWidget,
     ShortcutRegistry,
@@ -64,6 +65,98 @@ class ImageDisplayWidget(QtWidgets.QLabel):
         self.update_pixmap()
 
 
+def _apply_common_metadata(widget: QtWidgets.QWidget, metadata: Optional[ControlMetadata]) -> None:
+    if metadata is None:
+        return
+    tooltip = metadata.tooltip_text()
+    if tooltip:
+        widget.setToolTip(tooltip)
+        widget.setWhatsThis(tooltip)
+        widget.setStatusTip(tooltip)
+
+
+def _configure_spinbox(
+    spinbox: QtWidgets.QAbstractSpinBox,
+    module_identifier: str,
+    parameter_name: str,
+    initial_value: Any,
+) -> Any:
+    metadata = get_control_metadata(module_identifier, parameter_name)
+    if metadata is not None:
+        if isinstance(spinbox, QtWidgets.QDoubleSpinBox):
+            if metadata.minimum is not None:
+                spinbox.setMinimum(float(metadata.minimum))
+            if metadata.maximum is not None:
+                spinbox.setMaximum(float(metadata.maximum))
+            if metadata.step is not None:
+                spinbox.setSingleStep(float(metadata.step))
+            if metadata.decimals is not None:
+                spinbox.setDecimals(metadata.decimals)
+        elif isinstance(spinbox, QtWidgets.QSpinBox):
+            if metadata.minimum is not None:
+                spinbox.setMinimum(int(metadata.minimum))
+            if metadata.maximum is not None:
+                spinbox.setMaximum(int(metadata.maximum))
+            if metadata.step is not None:
+                spinbox.setSingleStep(int(metadata.step))
+        coerced_value = metadata.coerce(initial_value)
+        if coerced_value is None:
+            coerced_value = metadata.default
+        if coerced_value is not None:
+            spinbox.setValue(coerced_value)
+        _apply_common_metadata(spinbox, metadata)
+        return coerced_value
+
+    if initial_value is not None:
+        if isinstance(spinbox, QtWidgets.QDoubleSpinBox):
+            spinbox.setValue(float(initial_value))
+        elif isinstance(spinbox, QtWidgets.QSpinBox):
+            spinbox.setValue(int(initial_value))
+    return initial_value
+
+
+def _configure_combobox(
+    combobox: QtWidgets.QComboBox,
+    module_identifier: str,
+    parameter_name: str,
+    initial_value: Any,
+) -> Any:
+    metadata = get_control_metadata(module_identifier, parameter_name)
+    if metadata is not None:
+        combobox.blockSignals(True)
+        try:
+            if metadata.choices:
+                combobox.clear()
+                for option in metadata.choices:
+                    combobox.addItem(option.label, option.value)
+                    if option.description:
+                        combobox.setItemData(
+                            combobox.count() - 1, option.description, QtCore.Qt.ToolTipRole
+                        )
+            value_to_set = metadata.coerce(initial_value)
+            if value_to_set is None:
+                value_to_set = metadata.default
+            if value_to_set is not None:
+                index = combobox.findData(value_to_set)
+                if index == -1 and isinstance(value_to_set, str):
+                    index = combobox.findText(value_to_set)
+                if index >= 0:
+                    combobox.setCurrentIndex(index)
+        finally:
+            combobox.blockSignals(False)
+        _apply_common_metadata(combobox, metadata)
+        current_data = combobox.currentData(QtCore.Qt.UserRole)
+        if current_data is not None and metadata.value_type is not ControlValueType.STRING:
+            return current_data
+        if current_data is not None:
+            return current_data
+        return combobox.currentText()
+
+    if initial_value is not None:
+        combobox.setCurrentText(str(initial_value))
+    return combobox.currentText()
+
+
 class BrightnessContrastDialog(QtWidgets.QDialog):
     parametersChanged = QtCore.pyqtSignal(float, int)
 
@@ -75,20 +168,16 @@ class BrightnessContrastDialog(QtWidgets.QDialog):
     ):
         super().__init__()
         self.setWindowTitle("Brightness / Contrast")
-        self.initial_alpha = alpha
-        self.initial_beta = beta
-
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
 
         self.alpha_spin = QtWidgets.QDoubleSpinBox()
-        self.alpha_spin.setRange(0.1, 3.0)
-        self.alpha_spin.setValue(alpha)
-        self.alpha_spin.setSingleStep(0.1)
+        alpha = _configure_spinbox(self.alpha_spin, "BrightnessContrast", "alpha", alpha)
+        self.initial_alpha = alpha if alpha is not None else 1.0
 
         self.beta_spin = QtWidgets.QSpinBox()
-        self.beta_spin.setRange(-100, 100)
-        self.beta_spin.setValue(beta)
+        beta = _configure_spinbox(self.beta_spin, "BrightnessContrast", "beta", beta)
+        self.initial_beta = beta if beta is not None else 0
 
         form_layout.addRow("Contrast (alpha):", self.alpha_spin)
         form_layout.addRow("Brightness (beta):", self.beta_spin)
@@ -131,15 +220,12 @@ class GammaDialog(QtWidgets.QDialog):
     ):
         super().__init__()
         self.setWindowTitle("Gamma Correction")
-        self.initial_gamma = gamma
-
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
 
         self.gamma_spin = QtWidgets.QDoubleSpinBox()
-        self.gamma_spin.setRange(0.1, 5.0)
-        self.gamma_spin.setSingleStep(0.1)
-        self.gamma_spin.setValue(gamma)
+        gamma = _configure_spinbox(self.gamma_spin, "Gamma", "gamma", gamma)
+        self.initial_gamma = gamma if gamma is not None else 1.0
 
         form_layout.addRow("Gamma:", self.gamma_spin)
 
@@ -179,19 +265,16 @@ class NormalizeDialog(QtWidgets.QDialog):
     ):
         super().__init__()
         self.setWindowTitle("Intensity Normalization")
-        self.initial_alpha = alpha
-        self.initial_beta = beta
-
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
 
         self.alpha_spin = QtWidgets.QSpinBox()
-        self.alpha_spin.setRange(0, 255)
-        self.alpha_spin.setValue(alpha)
+        alpha = _configure_spinbox(self.alpha_spin, "IntensityNormalization", "alpha", alpha)
+        self.initial_alpha = alpha if alpha is not None else 0
 
         self.beta_spin = QtWidgets.QSpinBox()
-        self.beta_spin.setRange(0, 255)
-        self.beta_spin.setValue(beta)
+        beta = _configure_spinbox(self.beta_spin, "IntensityNormalization", "beta", beta)
+        self.initial_beta = beta if beta is not None else 255
 
         form_layout.addRow("Alpha:", self.alpha_spin)
         form_layout.addRow("Beta:", self.beta_spin)
@@ -235,20 +318,16 @@ class NoiseReductionDialog(QtWidgets.QDialog):
     ):
         super().__init__()
         self.setWindowTitle("Noise Reduction")
-        self.initial_method = method
-        self.initial_ksize = ksize
-
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
 
         self.method_combo = QtWidgets.QComboBox()
-        self.method_combo.addItems(["Gaussian", "Median", "Bilateral"])
-        self.method_combo.setCurrentText(method)
+        method = _configure_combobox(self.method_combo, "NoiseReduction", "method", method)
+        self.initial_method = method if method is not None else "Gaussian"
 
         self.ksize_spin = QtWidgets.QSpinBox()
-        self.ksize_spin.setRange(1, 15)
-        self.ksize_spin.setSingleStep(2)
-        self.ksize_spin.setValue(ksize)
+        ksize = _configure_spinbox(self.ksize_spin, "NoiseReduction", "ksize", ksize)
+        self.initial_ksize = int(ksize) if ksize is not None else 5
 
         form_layout.addRow("Method:", self.method_combo)
         form_layout.addRow("Kernel Size:", self.ksize_spin)
@@ -291,15 +370,12 @@ class SharpenDialog(QtWidgets.QDialog):
     ):
         super().__init__()
         self.setWindowTitle("Sharpen")
-        self.initial_strength = strength
-
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
 
         self.strength_spin = QtWidgets.QDoubleSpinBox()
-        self.strength_spin.setRange(0.0, 5.0)
-        self.strength_spin.setSingleStep(0.1)
-        self.strength_spin.setValue(strength)
+        strength = _configure_spinbox(self.strength_spin, "Sharpen", "strength", strength)
+        self.initial_strength = strength if strength is not None else 1.0
 
         form_layout.addRow("Strength:", self.strength_spin)
 
@@ -338,13 +414,13 @@ class SelectChannelDialog(QtWidgets.QDialog):
     ):
         super().__init__()
         self.setWindowTitle("Select Color Channel")
-        self.initial_channel = current_channel
-
         layout = QtWidgets.QVBoxLayout(self)
 
         self.channel_combo = QtWidgets.QComboBox()
-        self.channel_combo.addItems(["All", "R", "G", "B", "RG", "GB", "BR"])
-        self.channel_combo.setCurrentText(current_channel)
+        current_channel = _configure_combobox(
+            self.channel_combo, "SelectChannel", "channel", current_channel
+        )
+        self.initial_channel = current_channel if current_channel is not None else "All"
         layout.addWidget(self.channel_combo)
 
         btn_layout = QtWidgets.QHBoxLayout()
@@ -384,29 +460,24 @@ class CropDialog(QtWidgets.QDialog):
     ):
         super().__init__()
         self.setWindowTitle("Crop")
-        self.initial_x = x_offset
-        self.initial_y = y_offset
-        self.initial_width = width
-        self.initial_height = height
-
         layout = QtWidgets.QVBoxLayout(self)
         form_layout = QtWidgets.QFormLayout()
 
         self.x_spin = QtWidgets.QSpinBox()
-        self.x_spin.setRange(0, 5000)
-        self.x_spin.setValue(x_offset)
+        x_offset = _configure_spinbox(self.x_spin, "Crop", "x_offset", x_offset)
+        self.initial_x = int(x_offset) if x_offset is not None else 0
 
         self.y_spin = QtWidgets.QSpinBox()
-        self.y_spin.setRange(0, 5000)
-        self.y_spin.setValue(y_offset)
+        y_offset = _configure_spinbox(self.y_spin, "Crop", "y_offset", y_offset)
+        self.initial_y = int(y_offset) if y_offset is not None else 0
 
         self.width_spin = QtWidgets.QSpinBox()
-        self.width_spin.setRange(1, 5000)
-        self.width_spin.setValue(width)
+        width = _configure_spinbox(self.width_spin, "Crop", "width", width)
+        self.initial_width = int(width) if width is not None else 100
 
         self.height_spin = QtWidgets.QSpinBox()
-        self.height_spin.setRange(1, 5000)
-        self.height_spin.setValue(height)
+        height = _configure_spinbox(self.height_spin, "Crop", "height", height)
+        self.initial_height = int(height) if height is not None else 100
 
         form_layout.addRow("X Offset:", self.x_spin)
         form_layout.addRow("Y Offset:", self.y_spin)
