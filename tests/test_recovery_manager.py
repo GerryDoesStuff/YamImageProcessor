@@ -1,8 +1,16 @@
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+if "cv2" not in sys.modules:  # pragma: no cover - testing shim
+    sys.modules["cv2"] = SimpleNamespace(
+        imwrite=lambda *args, **kwargs: True,
+        IMREAD_UNCHANGED=1,
+        imread=lambda *args, **kwargs: None,
+    )
 
 from core.recovery import RecoveryManager
 
@@ -94,3 +102,24 @@ def test_cleanup_crash_markers_removes_session_marker(tmp_path):
     for marker in session_markers:
         assert marker.exists() is False
     assert marker_dir.exists() is False
+
+
+def test_summary_reports_pending_state(tmp_path):
+    autosave_dir, image_path, _backup_path = _prepare_autosave_workspace(tmp_path)
+    manager = RecoveryManager(autosave_dir)
+    manager.inspect_startup()
+
+    summary = manager.summary()
+    assert summary.has_snapshot is True
+    assert summary.snapshot is not None
+    assert summary.snapshot.image_path == image_path
+
+    metadata = summary.to_metadata()
+    assert metadata["has_snapshot"] is True
+    assert metadata["crash_marker_count"] == 0
+
+    status = summary.status_message()
+    assert status is not None
+    message, is_error = status
+    assert str(autosave_dir) in message
+    assert is_error is False

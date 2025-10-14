@@ -38,6 +38,8 @@ def present_error_report(
     enable_discard: bool = False,
     discard_label: Optional[str] = None,
     fallback_traceback: Optional[str] = None,
+    status_message: Optional[str] = None,
+    status_is_error: bool = False,
 ) -> ErrorResolution:
     """Present a detailed error dialog with optional recovery actions."""
 
@@ -70,6 +72,9 @@ def present_error_report(
     resolution = ErrorResolution.CLOSED
 
     log_file = _discover_log_file()
+
+    if status_message:
+        dialog.set_status_message(status_message, error=status_is_error)
 
     def _open_logs() -> None:
         if log_file is None:

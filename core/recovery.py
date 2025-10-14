@@ -40,6 +40,51 @@ class AutosaveSnapshot:
     crash_markers: Tuple[CrashMarker, ...]
 
 
+@dataclass(frozen=True)
+class RecoverySummary:
+    """High level summary describing crash recovery state."""
+
+    workspace: Path
+    has_snapshot: bool
+    crash_detected: bool
+    crash_markers: Tuple[CrashMarker, ...]
+    snapshot: Optional[AutosaveSnapshot]
+
+    def to_metadata(self) -> Dict[str, Any]:
+        """Return a JSON-serialisable summary of the recovery state."""
+
+        payload: Dict[str, Any] = {
+            "workspace": str(self.workspace),
+            "crash_detected": self.crash_detected,
+            "crash_marker_count": len(self.crash_markers),
+            "has_snapshot": self.has_snapshot,
+        }
+        if self.snapshot is not None:
+            payload["snapshot"] = {
+                "image_path": str(self.snapshot.image_path) if self.snapshot.image_path else None,
+                "metadata_path": str(self.snapshot.metadata_path)
+                if self.snapshot.metadata_path
+                else None,
+                "backup_count": len(self.snapshot.backups),
+            }
+        return payload
+
+    def status_message(self) -> Optional[Tuple[str, bool]]:
+        """Return a user-facing status message and severity for dialogs."""
+
+        if self.has_snapshot:
+            message = (
+                "A recoverable autosave snapshot is available in {path}."
+            ).format(path=str(self.workspace))
+            return message, False
+        if self.crash_detected or self.crash_markers:
+            message = (
+                "Crash recovery markers were detected. Review autosave workspace at {path}."
+            ).format(path=str(self.workspace))
+            return message, True
+        return None
+
+
 class RecoveryManager:
     """Inspect autosave workspaces and coordinate crash recovery actions."""
 
@@ -138,6 +183,97 @@ class RecoveryManager:
                 )
         self._session_marker_path = None
         self._prune_empty_recovery_dirs()
+
+    def summary(self) -> RecoverySummary:
+        """Return a high level summary describing the recovery state."""
+
+        snapshot = self._pending_snapshot
+        if snapshot is None:
+            snapshot = self._discover_snapshot()
+            self._pending_snapshot = snapshot
+        return RecoverySummary(
+            workspace=self._autosave_dir,
+            has_snapshot=snapshot is not None,
+            crash_detected=self._crash_detected or bool(self._crash_markers),
+            crash_markers=self._crash_markers,
+            snapshot=snapshot,
+        )
+
+    def discard_pending_snapshot(self) -> Optional[AutosaveSnapshot]:
+        """Alias for :meth:`discard_pending` for easier UI integration."""
+
+        return self.discard_pending()
+
+    def restore_pending_snapshot(self) -> Optional[AutosaveSnapshot]:
+        """Alias for :meth:`confirm_restored` for easier UI integration."""
+
+        snapshot = self.confirm_restored()
+        if snapshot is not None:
+            self.cleanup_crash_markers()
+        return snapshot
+
+    def refresh_snapshot(self) -> Optional[AutosaveSnapshot]:
+        """Re-evaluate the autosave workspace for pending snapshots."""
+
+        snapshot = self._discover_snapshot()
+        self._pending_snapshot = snapshot
+        return snapshot
+
+    def begin_guarded_write(
+        self,
+        *,
+        reason: str,
+        destination: Path,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> Optional[Path]:
+        """Write a crash marker describing an in-progress autosave operation."""
+
+        payload: Dict[str, Any] = {
+            "reason": reason,
+            "destination": str(destination),
+            "written_at": _utcnow().isoformat().replace("+00:00", "Z"),
+        }
+        if metadata:
+            payload["metadata"] = dict(metadata)
+        name = f"pending_{reason}_{_timestamp()}.json"
+        path = self._crash_marker_dir / name
+        try:
+            self._crash_marker_dir.mkdir(parents=True, exist_ok=True)
+            self._write_json(path, payload)
+        except Exception as exc:  # pragma: no cover - best effort logging
+            self._logger.debug(
+                "Failed to write guarded crash marker",
+                extra={"path": str(path), "error": str(exc)},
+            )
+            return None
+        return path
+
+    def complete_guarded_write(self, marker: Optional[Path], *, success: bool) -> None:
+        """Finalize a guarded write created with :meth:`begin_guarded_write`."""
+
+        if marker is None:
+            return
+        if success:
+            try:
+                marker.unlink()
+            except FileNotFoundError:
+                return
+            except Exception as exc:  # pragma: no cover - best effort cleanup
+                self._logger.debug(
+                    "Failed to remove crash marker",
+                    extra={"path": str(marker), "error": str(exc)},
+                )
+            self._prune_empty_recovery_dirs()
+
+    def notify_autosave_written(self) -> Optional[AutosaveSnapshot]:
+        """Record that a new autosave snapshot has been written."""
+
+        return self.refresh_snapshot()
+
+    def notify_autosave_cleared(self) -> None:
+        """Record that the autosave workspace has been cleared/restored."""
+
+        self._pending_snapshot = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -311,5 +447,6 @@ class RecoveryManager:
 __all__ = [
     "AutosaveSnapshot",
     "CrashMarker",
+    "RecoverySummary",
     "RecoveryManager",
 ]

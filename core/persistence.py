@@ -11,6 +11,7 @@ from typing import Any, Dict, Mapping, Optional
 import numpy as np
 
 from .io_manager import IOManager, SaveResult
+from .recovery import RecoveryManager
 from .settings import SettingsManager
 
 
@@ -56,6 +57,7 @@ class AutosaveManager:
         *,
         interval_seconds: Optional[float] = None,
         logger: Optional[logging.Logger] = None,
+        recovery_manager: Optional[RecoveryManager] = None,
     ) -> None:
         self._settings = settings
         self._io_manager = io_manager
@@ -68,6 +70,7 @@ class AutosaveManager:
         self._project_path: Optional[Path] = None
         self._autosave_dir = Path(autosave_directory)
         self._autosave_dir.mkdir(parents=True, exist_ok=True)
+        self._recovery = recovery_manager
 
         self._enabled = self._settings.autosave_enabled()
         self._interval = self._resolve_interval(interval_seconds)
@@ -111,7 +114,7 @@ class AutosaveManager:
                 return
             if self._interval == 0:
                 self._logger.debug("Autosave interval is zero; writing immediately")
-                self._write_autosave_locked(create_backup=False)
+                self._write_autosave_locked(create_backup=True)
             else:
                 self._schedule_autosave_locked()
 
@@ -145,15 +148,30 @@ class AutosaveManager:
                     metadata = payload.metadata
 
             metadata_dict = dict(metadata or {})
-            result = self._io_manager.save_image(
-                destination_path,
-                image,
-                metadata=metadata_dict,
-                pipeline=dict(pipeline),
-                settings_snapshot=self._settings_snapshot(),
-                create_backup=create_backup,
-                backup_retention=self._settings.autosave_backup_retention(),
-            )
+            marker = None
+            if self._recovery is not None:
+                marker = self._recovery.begin_guarded_write(
+                    reason="project_save",
+                    destination=destination_path,
+                    metadata={"create_backup": bool(create_backup)},
+                )
+            try:
+                result = self._io_manager.save_image(
+                    destination_path,
+                    image,
+                    metadata=metadata_dict,
+                    pipeline=dict(pipeline),
+                    settings_snapshot=self._settings_snapshot(),
+                    create_backup=create_backup,
+                    backup_retention=self._settings.autosave_backup_retention(),
+                )
+            except Exception:
+                if self._recovery is not None:
+                    self._recovery.complete_guarded_write(marker, success=False)
+                raise
+            if self._recovery is not None:
+                self._recovery.complete_guarded_write(marker, success=True)
+                self._recovery.notify_autosave_cleared()
             self._project_path = result.image_path
             self._payload = AutosavePayload.from_inputs(image, pipeline, metadata_dict)
             self._dirty = False
@@ -187,7 +205,7 @@ class AutosaveManager:
     def _autosave_callback(self) -> None:
         with self._lock:
             self._timer = None
-            self._write_autosave_locked(create_backup=False)
+            self._write_autosave_locked(create_backup=True)
 
     def _write_autosave_locked(self, *, create_backup: bool) -> None:
         if not self._dirty or self._payload is None:
@@ -202,6 +220,13 @@ class AutosaveManager:
             "source": "autosave",
             "timestamp": timestamp,
         })
+        marker = None
+        if self._recovery is not None:
+            marker = self._recovery.begin_guarded_write(
+                reason="autosave",
+                destination=destination,
+                metadata={"timestamp": timestamp},
+            )
         try:
             result = self._io_manager.save_image(
                 destination,
@@ -217,10 +242,15 @@ class AutosaveManager:
                 "Failed to write autosave snapshot",
                 extra={"destination": str(destination), "error": str(exc)},
             )
+            if self._recovery is not None:
+                self._recovery.complete_guarded_write(marker, success=False)
             return
 
         self._dirty = False
         self._last_result = result
+        if self._recovery is not None:
+            self._recovery.complete_guarded_write(marker, success=True)
+            self._recovery.notify_autosave_written()
         self._logger.info(
             "Autosave snapshot written",
             extra={"destination": str(result.image_path)},

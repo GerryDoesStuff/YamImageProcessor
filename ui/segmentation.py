@@ -1951,6 +1951,25 @@ class MainWindow(QtWidgets.QMainWindow):
         metadata: Dict[str, object] = {"module": "segmentation"}
         if context:
             metadata.update(context)
+        recovery_summary = None
+        recovery_status_message: Optional[str] = None
+        recovery_status_is_error = False
+        enable_discard_autosave = False
+        recovery_manager = getattr(self.app_core, "recovery_manager", None)
+        if recovery_manager is not None:
+            try:
+                recovery_summary = recovery_manager.summary()
+            except Exception as exc:  # pragma: no cover - defensive logging
+                LOGGER.debug(
+                    "Failed to summarise recovery state",
+                    extra={"component": "segmentation", "error": str(exc)},
+                )
+            else:
+                metadata.setdefault("recovery", recovery_summary.to_metadata())
+                status = recovery_summary.status_message()
+                if status is not None:
+                    recovery_status_message, recovery_status_is_error = status
+                enable_discard_autosave = recovery_summary.has_snapshot
         resolution = present_error_report(
             message,
             logger=LOGGER,
@@ -1960,7 +1979,18 @@ class MainWindow(QtWidgets.QMainWindow):
             enable_retry=enable_retry and retry_callback is not None,
             retry_label=retry_label,
             fallback_traceback=fallback_traceback,
+            enable_discard=enable_discard_autosave,
+            discard_label=self.tr("&Discard autosave"),
+            status_message=recovery_status_message,
+            status_is_error=recovery_status_is_error,
         )
+        if (
+            resolution is ErrorResolution.DISCARD_AUTOSAVE
+            and recovery_manager is not None
+            and recovery_summary is not None
+            and recovery_summary.has_snapshot
+        ):
+            recovery_manager.discard_pending_snapshot()
         if resolution is ErrorResolution.RETRY and retry_callback is not None:
             try:
                 retry_callback()

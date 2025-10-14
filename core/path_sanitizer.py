@@ -99,10 +99,14 @@ def sanitize_user_path(
     if not allow_directory and not allow_file:
         raise PathValidationError("Either directories or files must be permitted")
 
-    candidate = _normalise_path(path)
+    raw_candidate = Path(path).expanduser()
+    if not raw_candidate.is_absolute():
+        raw_candidate = Path.cwd() / raw_candidate
 
-    if _contains_symlink(candidate):
+    if _contains_symlink(raw_candidate):
         raise PathValidationError("Paths containing symbolic links are not permitted")
+
+    candidate = _normalise_path(path)
 
     try:
         resolved = candidate.resolve(strict=must_exist)
