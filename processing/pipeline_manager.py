@@ -1,7 +1,9 @@
 """Utilities for managing ordered image processing pipelines."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import numpy as np
@@ -60,12 +62,59 @@ class PipelineState:
 class PipelineManager:
     """Store an ordered collection of pipeline steps with undo/redo support."""
 
-    def __init__(self, steps: Optional[Iterable[PipelineStep]] = None) -> None:
+    _DEFAULT_CACHE_DIR: Optional[Path] = None
+    _DEFAULT_RECOVERY_ROOT: Optional[Path] = None
+
+    def __init__(
+        self,
+        steps: Optional[Iterable[PipelineStep]] = None,
+        *,
+        cache_dir: Optional[os.PathLike[str] | str] = None,
+        recovery_root: Optional[os.PathLike[str] | str] = None,
+    ) -> None:
         template = [step.clone() for step in steps or []]
         self._template: List[PipelineStep] = template
         self._steps: List[PipelineStep] = [step.clone() for step in template]
         self._undo_stack: List[PipelineState] = []
         self._redo_stack: List[PipelineState] = []
+        self._cache_directory: Optional[Path] = None
+        self._recovery_root: Optional[Path] = None
+        self.set_cache_directory(cache_dir if cache_dir is not None else self._DEFAULT_CACHE_DIR)
+        self.set_recovery_root(
+            recovery_root if recovery_root is not None else self._DEFAULT_RECOVERY_ROOT
+        )
+
+    @classmethod
+    def set_default_cache_directory(cls, path: Optional[os.PathLike[str] | str]) -> None:
+        cls._DEFAULT_CACHE_DIR = None if path is None else Path(path)
+        if cls._DEFAULT_CACHE_DIR is not None:
+            cls._DEFAULT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def set_default_recovery_root(cls, path: Optional[os.PathLike[str] | str]) -> None:
+        cls._DEFAULT_RECOVERY_ROOT = None if path is None else Path(path)
+        if cls._DEFAULT_RECOVERY_ROOT is not None:
+            cls._DEFAULT_RECOVERY_ROOT.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def cache_directory(self) -> Optional[Path]:
+        return self._cache_directory
+
+    @property
+    def recovery_root(self) -> Optional[Path]:
+        return self._recovery_root
+
+    def set_cache_directory(self, path: Optional[os.PathLike[str] | str]) -> None:
+        directory = None if path is None else Path(path)
+        if directory is not None:
+            directory.mkdir(parents=True, exist_ok=True)
+        self._cache_directory = directory
+
+    def set_recovery_root(self, path: Optional[os.PathLike[str] | str]) -> None:
+        base = None if path is None else Path(path)
+        if base is not None:
+            base.mkdir(parents=True, exist_ok=True)
+        self._recovery_root = base
 
     # ------------------------------------------------------------------
     # Convenience helpers
@@ -83,7 +132,11 @@ class PipelineManager:
                 yield step
 
     def clone(self) -> "PipelineManager":
-        clone = PipelineManager(self._template)
+        clone = PipelineManager(
+            self._template,
+            cache_dir=self._cache_directory,
+            recovery_root=self._recovery_root,
+        )
         clone._steps = [step.clone() for step in self._steps]
         return clone
 

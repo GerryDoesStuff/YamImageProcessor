@@ -4,6 +4,8 @@ from __future__ import annotations
 import importlib
 import logging
 import pkgutil
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -44,6 +46,9 @@ class AppConfiguration:
     )
     translation_locales: Sequence[str] = field(default_factory=tuple)
     translation_prefix: str = "yam_processor"
+    session_temp_enabled: bool = True
+    session_temp_parent: Optional[Path | str] = None
+    session_temp_cleanup_on_shutdown: bool = True
 
 
 class AppCore:
@@ -66,6 +71,9 @@ class AppCore:
         self._preprocessing_manager: Optional[PipelineManager] = None
         self._preprocessing_templates: Dict[str, PipelineStep] = {}
         self._pipeline_cache: Optional[PipelineCache] = None
+        self.session_temp_root: Optional[Path] = None
+        self.session_pipeline_cache_dir: Optional[Path] = None
+        self.session_recovery_dir: Optional[Path] = None
 
     # ------------------------------------------------------------------
     # Lifecycle management
@@ -75,6 +83,7 @@ class AppCore:
         if self._bootstrapped:
             return
 
+        self._prepare_session_temp_root()
         self._configure_logging()
         self._init_settings()
         self._init_threading()
@@ -102,6 +111,10 @@ class AppCore:
             self.autosave_manager.shutdown()
             self.autosave_manager = None
 
+        self._pipeline_cache = None
+        self._preprocessing_manager = None
+        self._preprocessing_templates = {}
+        self._teardown_session_temp_root()
         self.logger.info("Application core shutdown", extra={"component": "AppCore"})
         self._bootstrapped = False
 
@@ -152,7 +165,10 @@ class AppCore:
         if self._pipeline_cache is None:
             if self.settings_manager is None:
                 raise RuntimeError("Settings manager not initialised. Call bootstrap() first.")
-            self._pipeline_cache = PipelineCache(self.settings_manager)
+            self._pipeline_cache = PipelineCache(
+                self.settings_manager,
+                cache_directory=self.session_pipeline_cache_dir,
+            )
         return self._pipeline_cache
 
     def get_preprocessing_pipeline_manager(self) -> PipelineManager:
@@ -162,7 +178,11 @@ class AppCore:
                 step = module.create_pipeline_step()
                 templates[step.name] = step
             self._preprocessing_templates = templates
-            self._preprocessing_manager = PipelineManager(templates.values())
+            self._preprocessing_manager = PipelineManager(
+                templates.values(),
+                cache_dir=self.session_pipeline_cache_dir,
+                recovery_root=self.session_recovery_dir,
+            )
         return self._preprocessing_manager
 
     def preprocessing_step_template(self, name: str) -> PipelineStep:
@@ -217,7 +237,10 @@ class AppCore:
             self.config.application,
             defaults=defaults,
         )
-        self._pipeline_cache = PipelineCache(self.settings_manager)
+        self._pipeline_cache = PipelineCache(
+            self.settings_manager,
+            cache_directory=self.session_pipeline_cache_dir,
+        )
         stored_diagnostics = self.settings_manager.get(
             "diagnostics/enabled", self.config.diagnostics_enabled
         )
@@ -410,6 +433,101 @@ class AppCore:
         )
         if not self.config.diagnostics_enabled:
             self.logger.setLevel(level)
+
+    def _prepare_session_temp_root(self) -> None:
+        if not self.config.session_temp_enabled:
+            self.logger.debug(
+                "Session temporary directories disabled by configuration",
+                extra={"component": "AppCore"},
+            )
+            return
+
+        if self.session_temp_root is not None:
+            return
+
+        prefix = f"{self.config.application.lower()}_session_"
+        parent = self.config.session_temp_parent
+        dir_arg = str(parent) if parent is not None else None
+
+        try:
+            root = Path(tempfile.mkdtemp(prefix=prefix, dir=dir_arg))
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.warning(
+                "Failed to create session temporary directory",
+                extra={"component": "AppCore", "error": str(exc)},
+            )
+            return
+
+        pipeline_cache_dir = root / "pipeline_cache"
+        recovery_dir = root / "recovery"
+
+        try:
+            pipeline_cache_dir.mkdir(parents=True, exist_ok=True)
+            recovery_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.warning(
+                "Failed to initialise session temporary subdirectories",
+                extra={"component": "AppCore", "temp_dir": str(root), "error": str(exc)},
+            )
+            try:
+                shutil.rmtree(root, ignore_errors=True)
+            finally:
+                return
+
+        self.session_temp_root = root
+        self.session_pipeline_cache_dir = pipeline_cache_dir
+        self.session_recovery_dir = recovery_dir
+
+        PipelineCache.set_default_cache_directory(pipeline_cache_dir)
+        PipelineManager.set_default_cache_directory(pipeline_cache_dir)
+        PipelineManager.set_default_recovery_root(recovery_dir)
+
+        self.logger.debug(
+            "Session temporary directories initialised",
+            extra={
+                "component": "AppCore",
+                "temp_root": str(root),
+                "pipeline_cache_dir": str(pipeline_cache_dir),
+                "recovery_dir": str(recovery_dir),
+            },
+        )
+
+    def _teardown_session_temp_root(self) -> None:
+        root = self.session_temp_root
+        if root is None:
+            return
+
+        PipelineCache.set_default_cache_directory(None)
+        PipelineManager.set_default_cache_directory(None)
+        PipelineManager.set_default_recovery_root(None)
+
+        should_cleanup = self.config.session_temp_cleanup_on_shutdown
+        if should_cleanup:
+            try:
+                shutil.rmtree(root, ignore_errors=False)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self.logger.warning(
+                    "Failed to remove session temporary directory",
+                    extra={
+                        "component": "AppCore",
+                        "temp_root": str(root),
+                        "error": str(exc),
+                    },
+                )
+            else:
+                self.logger.debug(
+                    "Session temporary directory removed",
+                    extra={"component": "AppCore", "temp_root": str(root)},
+                )
+        else:
+            self.logger.debug(
+                "Preserving session temporary directory on shutdown",
+                extra={"component": "AppCore", "temp_root": str(root)},
+            )
+
+        self.session_temp_root = None
+        self.session_pipeline_cache_dir = None
+        self.session_recovery_dir = None
 
     @staticmethod
     def _coerce_bool(value: object) -> bool:
