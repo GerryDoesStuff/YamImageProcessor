@@ -7,7 +7,14 @@ pipeline behaviours before showing the window.
 """
 
 from .diagnostics_panel import DiagnosticsPanel
-from .dialogs import ParameterDialog, ParameterSpec, ParameterType, PreviewWidget
+from .dialogs import (
+    ParameterDialog,
+    ParameterSpec,
+    ParameterType,
+    PreviewWidget,
+    TiledImageLevel,
+    TiledImageRecord,
+)
 from .error_dialog import ErrorDialog
 from .main_window import MainWindow
 from .pipeline_controller import PipelineController
@@ -20,5 +27,7 @@ __all__ = [
     "ParameterType",
     "PipelineController",
     "PreviewWidget",
+    "TiledImageLevel",
+    "TiledImageRecord",
     "ErrorDialog",
 ]

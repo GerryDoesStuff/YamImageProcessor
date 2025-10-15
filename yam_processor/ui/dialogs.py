@@ -5,7 +5,7 @@ from __future__ import annotations
 import traceback
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets  # type: ignore
@@ -58,8 +58,66 @@ def _apply_parameter_metadata(widget: QtWidgets.QWidget, spec: ParameterSpec) ->
         widget.setWhatsThis(tooltip)
 
 
+@dataclass(frozen=True)
+class TiledImageLevel:
+    """Description for a single resolution level of a tiled image."""
+
+    scale: float
+    fetch: Callable[[], np.ndarray]
+
+    def __post_init__(self) -> None:
+        if self.scale <= 0:
+            raise ValueError("TiledImageLevel.scale must be positive")
+
+
+@dataclass(frozen=True)
+class TiledImageRecord:
+    """Lazy description of a multi-resolution image for preview rendering."""
+
+    levels: Sequence[TiledImageLevel]
+
+    def __post_init__(self) -> None:
+        if not self.levels:
+            raise ValueError("TiledImageRecord requires at least one level")
+
+    @classmethod
+    def from_array(cls, image: np.ndarray) -> "TiledImageRecord":
+        array = np.ascontiguousarray(image)
+        return cls([TiledImageLevel(scale=1.0, fetch=lambda: array)])
+
+    def ordered_levels(self) -> List[TiledImageLevel]:
+        return sorted(self.levels, key=lambda level: level.scale)
+
+
+class _TileFetchWorkerSignals(QtCore.QObject):
+    finished = QtCore.pyqtSignal(int, object, int)
+    failed = QtCore.pyqtSignal(int, Exception, str, int)
+
+
+class _TileFetchRunnable(QtCore.QRunnable):
+    def __init__(
+        self,
+        request_id: int,
+        level_index: int,
+        fetch_callable: Callable[[], np.ndarray],
+    ) -> None:
+        super().__init__()
+        self.request_id = request_id
+        self.level_index = level_index
+        self.fetch_callable = fetch_callable
+        self.signals = _TileFetchWorkerSignals()
+
+    def run(self) -> None:  # noqa: D401 - Qt interface
+        try:
+            array = self.fetch_callable()
+        except Exception as exc:  # pragma: no cover - Qt threading
+            self.signals.failed.emit(self.level_index, exc, traceback.format_exc(), self.request_id)
+            return
+        self.signals.finished.emit(self.level_index, array, self.request_id)
+
+
 class PreviewWidget(QtWidgets.QWidget):
-    """Display widget that renders numpy arrays into a ``QGraphicsView``."""
+    """Display widget that renders tiled images into a ``QGraphicsView``."""
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
@@ -74,25 +132,33 @@ class PreviewWidget(QtWidgets.QWidget):
         self._view.setFrameShape(QtWidgets.QFrame.NoFrame)
         self._current_pixmap: Optional[QtWidgets.QGraphicsPixmapItem] = None
         self._image_buffer: Optional[np.ndarray] = None
+        self._thread_pool = QtCore.QThreadPool.globalInstance()
+        self._request_id = 0
+        self._pending_levels: List[tuple[int, TiledImageLevel]] = []
+        self._active_record: Optional[TiledImageRecord] = None
+        self._current_level_index: Optional[int] = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._view)
 
-    def set_image(self, image: Optional[np.ndarray]) -> None:
-        """Render ``image`` or clear the view if ``None`` is supplied."""
+    def set_image(self, record: Optional[TiledImageRecord]) -> None:
+        """Render ``record`` or clear the view if ``None`` is supplied."""
 
         self._scene.clear()
         self._current_pixmap = None
         self._image_buffer = None
-        if image is None:
+        self._active_record = record
+        self._pending_levels = []
+        self._current_level_index = None
+        self._request_id += 1
+        request_id = self._request_id
+        if record is None:
             return
 
-        qimage, buffer = self._to_qimage(image)
-        self._image_buffer = buffer
-        pixmap = QtGui.QPixmap.fromImage(qimage)
-        self._current_pixmap = self._scene.addPixmap(pixmap)
-        self._fit_view()
+        ordered_levels = record.ordered_levels()
+        self._pending_levels = list(enumerate(ordered_levels))
+        self._start_next_level(request_id)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
@@ -105,6 +171,43 @@ class PreviewWidget(QtWidgets.QWidget):
         if rect.isNull():
             return
         self._view.fitInView(rect, QtCore.Qt.KeepAspectRatio)
+
+    def _start_next_level(self, request_id: int) -> None:
+        if not self._pending_levels:
+            return
+        level_index, level = self._pending_levels.pop(0)
+        runnable = _TileFetchRunnable(request_id, level_index, level.fetch)
+        runnable.signals.finished.connect(self._handle_level_finished)
+        runnable.signals.failed.connect(self._handle_level_failed)
+        self._thread_pool.start(runnable)
+
+    @QtCore.pyqtSlot(int, object, int)
+    def _handle_level_finished(self, level_index: int, image: object, request_id: int) -> None:
+        if request_id != self._request_id:
+            return
+        if not isinstance(image, np.ndarray):
+            return
+        qimage, buffer = self._to_qimage(image)
+        self._image_buffer = buffer
+        pixmap = QtGui.QPixmap.fromImage(qimage)
+        if self._current_pixmap is None:
+            self._current_pixmap = self._scene.addPixmap(pixmap)
+            self._fit_view()
+        else:
+            self._current_pixmap.setPixmap(pixmap)
+        self._current_level_index = level_index
+        self._start_next_level(request_id)
+
+    @QtCore.pyqtSlot(int, Exception, str, int)
+    def _handle_level_failed(
+        self, level_index: int, error: Exception, traceback_text: str, request_id: int
+    ) -> None:  # pragma: no cover - Qt threading
+        if request_id != self._request_id:
+            return
+        QtCore.qWarning(  # type: ignore[attr-defined]
+            f"PreviewWidget failed to fetch level {level_index}: {error}\n{traceback_text}"
+        )
+        self._start_next_level(request_id)
 
     @staticmethod
     def _to_qimage(image: np.ndarray) -> tuple[QtGui.QImage, np.ndarray]:
@@ -149,7 +252,7 @@ class _PreviewWorkerSignals(QtCore.QObject):
 class _PreviewRunnable(QtCore.QRunnable):
     def __init__(
         self,
-        preview_callable: Callable[[np.ndarray, Dict[str, Any]], np.ndarray],
+        preview_callable: Callable[[np.ndarray, Dict[str, Any]], object],
         image: np.ndarray,
         params: Dict[str, Any],
     ) -> None:
@@ -165,7 +268,15 @@ class _PreviewRunnable(QtCore.QRunnable):
         except Exception as exc:  # pragma: no cover - Qt threading
             self.signals.failed.emit(exc, traceback.format_exc())
             return
-        self.signals.finished.emit(result)
+        if isinstance(result, np.ndarray):
+            record: Optional[TiledImageRecord] = TiledImageRecord.from_array(result)
+        elif isinstance(result, TiledImageRecord):
+            record = result
+        elif result is None:
+            record = None
+        else:
+            record = None
+        self.signals.finished.emit(record)
 
 
 class ParameterDialog(QtWidgets.QDialog):
@@ -173,14 +284,14 @@ class ParameterDialog(QtWidgets.QDialog):
 
     cancelled = QtCore.pyqtSignal()
     parametersChanged = QtCore.pyqtSignal(dict)
-    previewUpdated = QtCore.pyqtSignal(np.ndarray)
+    previewUpdated = QtCore.pyqtSignal(object)
     previewFailed = QtCore.pyqtSignal(Exception, str)
     errorOccurred = QtCore.pyqtSignal(str, dict)
 
     def __init__(
         self,
         schema: Iterable[ParameterSpec],
-        preview_callback: Optional[Callable[[np.ndarray, Dict[str, Any]], np.ndarray]] = None,
+        preview_callback: Optional[Callable[[np.ndarray, Dict[str, Any]], object]] = None,
         *,
         parent: Optional[QtWidgets.QWidget] = None,
         window_title: Optional[str] = None,
@@ -421,7 +532,7 @@ class ParameterDialog(QtWidgets.QDialog):
     @QtCore.pyqtSlot(object)
     def _handle_preview_finished(self, result: object) -> None:
         self._preview_running = False
-        if isinstance(result, np.ndarray):
+        if isinstance(result, TiledImageRecord):
             self._preview_widget.set_image(result)
             self.previewUpdated.emit(result)
             self._status_label.setText(self.tr("Preview updated"))
@@ -475,5 +586,7 @@ __all__ = [
     "ParameterSpec",
     "ParameterType",
     "PreviewWidget",
+    "TiledImageLevel",
+    "TiledImageRecord",
 ]
 
