@@ -61,8 +61,21 @@ class DummyIOManager:
         destination.parent.mkdir(parents=True, exist_ok=True)
         previous_bytes = destination.read_bytes() if destination.exists() else None
         destination.write_bytes(image.tobytes())
-        metadata_path = destination.with_suffix(destination.suffix + ".json")
-        metadata_path.write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
+        sidecar = {
+            "schema": "test.autosave",
+            "image": {
+                "filename": destination.name,
+                "path": str(destination),
+                "display_path": str(destination),
+                "root_index": 0,
+                "format": "DUMMY",
+            },
+            "metadata": dict(metadata),
+            "pipeline": dict(pipeline),
+            "settings": dict(settings_snapshot),
+        }
+        metadata_path = destination.with_suffix(".json")
+        metadata_path.write_text(json.dumps(sidecar, sort_keys=True), encoding="utf-8")
         if create_backup and previous_bytes is not None:
             backup_dir = destination.parent / "backups"
             backup_dir.mkdir(parents=True, exist_ok=True)

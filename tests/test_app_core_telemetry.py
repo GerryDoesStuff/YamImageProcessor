@@ -18,10 +18,11 @@ if str(PROJECT_ROOT) not in sys.path:
 pyqt5_module = types.ModuleType("PyQt5")
 qtcore_module = types.ModuleType("PyQt5.QtCore")
 qtwidgets_module = types.ModuleType("PyQt5.QtWidgets")
+qtgui_module = types.ModuleType("PyQt5.QtGui")
 data_module = types.ModuleType("yam_processor.data")
 plugins_base_module = types.ModuleType("yam_processor.plugins.base")
 ui_module = types.ModuleType("yam_processor.ui")
-ui_module.__path__ = []  # type: ignore[attr-defined]
+ui_module.__path__ = [str(PROJECT_ROOT / "yam_processor" / "ui")]  # type: ignore[attr-defined]
 error_reporter_module = types.ModuleType("yam_processor.ui.error_reporter")
 pil_module = types.ModuleType("PIL")
 pil_image_module = types.ModuleType("PIL.Image")
@@ -54,7 +55,15 @@ qtcore_module.QLocale = _DummyQLocale
 qtcore_module.QTranslator = _DummyQTranslator
 qtcore_module.QObject = type("QObject", (), {})
 qtcore_module.pyqtSignal = lambda *args, **kwargs: lambda *a, **k: None
+class _DummyDesktopServices:
+    @staticmethod
+    def openUrl(url):  # type: ignore[override]
+        return True
+
+
+qtgui_module.QDesktopServices = _DummyDesktopServices
 pyqt5_module.QtCore = qtcore_module
+pyqt5_module.QtGui = qtgui_module
 qtwidgets_module.QWidget = type("QWidget", (), {})
 
 
@@ -68,9 +77,13 @@ qtwidgets_module.QApplication = _DummyQApplication
 pyqt5_module.QtWidgets = qtwidgets_module
 sys.modules.setdefault("PyQt5", pyqt5_module)
 sys.modules.setdefault("PyQt5.QtCore", qtcore_module)
+sys.modules.setdefault("PyQt5.QtGui", qtgui_module)
 sys.modules.setdefault("PyQt5.QtWidgets", qtwidgets_module)
 data_module.configure_allowed_roots = lambda roots: None
 data_module.sanitize_user_path = lambda path, **_: Path(path)
+data_module.ImageRecord = type("ImageRecord", (), {})
+data_module.load_image = lambda *args, **kwargs: data_module.ImageRecord()
+data_module.save_image = lambda *args, **kwargs: None
 plugins_base_module.PipelineStage = enum.Enum("PipelineStage", {"DUMMY": "dummy"})
 plugins_base_module.ModuleBase = type("ModuleBase", (), {"stage": plugins_base_module.PipelineStage.DUMMY})
 error_reporter_module.ErrorResolution = enum.Enum("ErrorResolution", {"DISMISS": "dismiss"})
@@ -162,6 +175,7 @@ def _bootstrap_core(
     )
     core = AppCore(config)
 
+    monkeypatch.setattr("yam_processor.core.settings_manager.QSettings", None, raising=False)
     monkeypatch.setattr(core, "_init_persistence", lambda: None)
     monkeypatch.setattr(core, "_init_threading", lambda: None)
     monkeypatch.setattr(core, "_discover_plugins", lambda: None)

@@ -61,6 +61,7 @@ class UpdateMetadata:
 
     version: str
     notes: Optional[str] = None
+    release_notes_url: Optional[str] = None
     download_url: Optional[str] = None
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -69,19 +70,37 @@ class UpdateMetadata:
         """Create an :class:`UpdateMetadata` instance from ``payload``.
 
         The endpoint is expected to return a JSON document containing at least
-        a ``version`` key.  Optional fields such as ``notes`` and
-        ``download_url`` are extracted when present.
+        a ``version`` key.  Optional fields such as ``notes``,
+        ``release_notes_url`` and ``download_url`` are extracted when present.
         """
 
         if "version" not in payload or not payload["version"]:
             raise ValueError("Update metadata payload is missing a version field")
 
         version = str(payload["version"])
-        notes = payload.get("notes") or payload.get("release_notes")
+        release_notes_field = payload.get("release_notes")
+        notes = payload.get("notes")
+        release_notes_url = (
+            payload.get("release_notes_url")
+            or payload.get("notes_url")
+            or payload.get("changelog_url")
+        )
+        if isinstance(notes, dict):
+            release_notes_url = release_notes_url or notes.get("url")
+            notes = notes.get("text")
+        if notes is None:
+            if isinstance(release_notes_field, dict):
+                notes = release_notes_field.get("text")
+                release_notes_url = release_notes_url or release_notes_field.get("url")
+            elif release_notes_field is not None:
+                notes = release_notes_field
         download_url = payload.get("download_url") or payload.get("url")
         return cls(
             version=version,
             notes=str(notes) if notes is not None else None,
+            release_notes_url=(
+                str(release_notes_url) if release_notes_url is not None else None
+            ),
             download_url=str(download_url) if download_url is not None else None,
             raw={k: v for k, v in payload.items()},
         )

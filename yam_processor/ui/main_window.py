@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import traceback
-from typing import Iterable, Optional, TYPE_CHECKING
+from typing import Callable, Iterable, Optional, TYPE_CHECKING
 
 from PyQt5 import QtCore, QtGui, QtWidgets  # type: ignore
 
@@ -13,6 +13,7 @@ from .diagnostics_panel import DiagnosticsPanel
 from .pipeline_controller import PipelineController
 from .resources import load_icon
 from .tooltips import build_main_window_tooltips
+from .update_dialog import UpdateDialog
 from yam_processor.core.threading import ThreadController
 
 if TYPE_CHECKING:
@@ -60,6 +61,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._thread_controller: Optional[ThreadController] = thread_controller
         self._update_dispatcher: Optional["UpdateDispatcher"] = None
         self._pending_update: Optional["UpdateMetadata"] = None
+        self._update_dialog_factory: Callable[["UpdateMetadata"], QtWidgets.QDialog] = (
+            lambda metadata: UpdateDialog(metadata, self)
+        )
         self._pipeline_controller: Optional[PipelineController] = None
         if pipeline_controller is not None:
             self.set_pipeline_controller(pipeline_controller)
@@ -130,6 +134,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._logger.info(
             "Update available", extra={"component": "MainWindow", "version": metadata.version}
         )
+        self._show_update_dialog()
 
     @QtCore.pyqtSlot(bool)
     def toggle_pipeline_dock(self, visible: bool) -> None:
@@ -189,6 +194,17 @@ class MainWindow(QtWidgets.QMainWindow):
             "Update {version} acknowledged"
         ).format(version=acknowledged.version)
         self.statusMessageRequested.emit(message, 5000)
+
+    def _create_update_dialog(self, metadata: "UpdateMetadata") -> QtWidgets.QDialog:
+        return self._update_dialog_factory(metadata)
+
+    def _show_update_dialog(self) -> None:
+        if self._pending_update is None:
+            return
+        dialog = self._create_update_dialog(self._pending_update)
+        result = dialog.exec_()
+        if result == QtWidgets.QDialog.Accepted:
+            self.acknowledge_available_update()
 
     def _build_actions(self) -> None:
         self.open_project_action = QtWidgets.QAction(self.tr("&Open Project…"), self)
