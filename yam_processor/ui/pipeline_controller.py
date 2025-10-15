@@ -10,7 +10,7 @@ import numpy as np
 
 from PyQt5 import QtWidgets  # type: ignore
 
-from yam_processor.data import ImageRecord, load_image, save_image
+from yam_processor.data import ImageRecord, TiledImageRecord, load_image, save_image
 from yam_processor.processing import PipelineManager, PipelineStep
 
 if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
@@ -48,7 +48,9 @@ class PipelineController:
     # ------------------------------------------------------------------
     # Image I/O helpers
     # ------------------------------------------------------------------
-    def load_image_record(self, path: str | Path, *, record_history: bool = False) -> ImageRecord:
+    def load_image_record(
+        self, path: str | Path, *, record_history: bool = False
+    ) -> ImageRecord | TiledImageRecord:
         """Load an image file into an :class:`ImageRecord`.
 
         Parameters
@@ -62,11 +64,15 @@ class PipelineController:
 
         record = load_image(path)
         if record_history:
-            self.record_history(record.data)
+            self.record_history(record.to_array())
         return record
 
     def save_image_record(
-        self, record: ImageRecord, path: str | Path, *, format: Optional[str] = None
+        self,
+        record: ImageRecord | TiledImageRecord,
+        path: str | Path,
+        *,
+        format: Optional[str] = None,
     ) -> None:
         """Persist ``record`` using the shared image I/O helpers."""
 
