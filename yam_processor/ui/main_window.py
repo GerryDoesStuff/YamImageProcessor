@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import traceback
-from typing import Iterable, Optional
+from typing import Iterable, Optional, TYPE_CHECKING
 
 from PyQt5 import QtCore, QtGui, QtWidgets  # type: ignore
 
@@ -14,6 +14,9 @@ from .pipeline_controller import PipelineController
 from .resources import load_icon
 from .tooltips import build_main_window_tooltips
 from yam_processor.core.threading import ThreadController
+
+if TYPE_CHECKING:
+    from yam_processor.core.app_core import UpdateDispatcher, UpdateMetadata
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -40,6 +43,7 @@ class MainWindow(QtWidgets.QMainWindow):
         parent: Optional[QtWidgets.QWidget] = None,
         *,
         thread_controller: Optional[ThreadController] = None,
+        update_dispatcher: Optional["UpdateDispatcher"] = None,
     ) -> None:
         super().__init__(parent)
 
@@ -54,9 +58,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._logger = logging.getLogger(__name__)
         self._app_version = self._resolve_app_version()
         self._thread_controller: Optional[ThreadController] = thread_controller
+        self._update_dispatcher: Optional["UpdateDispatcher"] = None
+        self._pending_update: Optional["UpdateMetadata"] = None
         self._pipeline_controller: Optional[PipelineController] = None
         if pipeline_controller is not None:
             self.set_pipeline_controller(pipeline_controller)
+        if update_dispatcher is not None:
+            self.set_update_dispatcher(update_dispatcher)
 
         self.setWindowTitle(self.tr("Yam Image Processor"))
 
@@ -94,12 +102,34 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.diagnostics_panel is not None:
             self.diagnostics_panel.set_thread_controller(controller)
 
+    def set_update_dispatcher(self, dispatcher: "UpdateDispatcher") -> None:
+        """Listen for update notifications emitted by ``dispatcher``."""
+
+        if self._update_dispatcher is dispatcher:
+            return
+        if self._update_dispatcher is not None:
+            self._update_dispatcher.remove_listener(self._on_update_available)
+        self._update_dispatcher = dispatcher
+        dispatcher.add_listener(self._on_update_available)
+
     def diagnostics_log_handler(self) -> Optional[logging.Handler]:
         """Return the logging handler streaming messages to the diagnostics panel."""
 
         if self.diagnostics_panel is None:
             return None
         return self.diagnostics_panel.log_handler()
+
+    def _on_update_available(self, metadata: "UpdateMetadata") -> None:
+        """Handle update notifications emitted by :class:`AppCore`."""
+
+        self._pending_update = metadata
+        message = self.tr(
+            "Update {version} is available"
+        ).format(version=metadata.version)
+        self.statusMessageRequested.emit(message, 0)
+        self._logger.info(
+            "Update available", extra={"component": "MainWindow", "version": metadata.version}
+        )
 
     @QtCore.pyqtSlot(bool)
     def toggle_pipeline_dock(self, visible: bool) -> None:
@@ -146,6 +176,19 @@ class MainWindow(QtWidgets.QMainWindow):
         status_bar = QtWidgets.QStatusBar(self)
         status_bar.setSizeGripEnabled(True)
         self.setStatusBar(status_bar)
+
+    def acknowledge_available_update(self) -> None:
+        """Acknowledge any pending update notification."""
+
+        if self._pending_update is None or self._update_dispatcher is None:
+            return
+        acknowledged = self._pending_update
+        self._pending_update = None
+        self._update_dispatcher.acknowledge()
+        message = self.tr(
+            "Update {version} acknowledged"
+        ).format(version=acknowledged.version)
+        self.statusMessageRequested.emit(message, 5000)
 
     def _build_actions(self) -> None:
         self.open_project_action = QtWidgets.QAction(self.tr("&Open Project…"), self)

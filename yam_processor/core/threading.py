@@ -215,6 +215,8 @@ class ThreadController:
         self._pending: Deque[concurrent.futures.Future] = deque()
         self._lock = threading.Lock()
         self._logger = logging.getLogger(__name__)
+        self._pause_event = threading.Event()
+        self._pause_event.set()
 
     def submit(
         self,
@@ -233,8 +235,19 @@ class ThreadController:
         progress and cancellation hooks.
         """
 
+        def _wait_for_resume() -> None:
+            while not self._pause_event.wait(timeout=0.1):
+                if cancellation_event is not None and cancellation_event.is_set():
+                    raise concurrent.futures.CancelledError()
+                if cancel_token is not None and self._evaluate_cancel_token(cancel_token):
+                    raise concurrent.futures.CancelledError()
+
+        def _run(*task_args: Any, **task_kwargs: Any) -> Any:
+            _wait_for_resume()
+            return fn(*task_args, **task_kwargs)
+
         task = ThreadTask(
-            fn,
+            _run,
             args,
             kwargs,
             progress_callback=progress_callback,
@@ -253,6 +266,24 @@ class ThreadController:
         future.add_done_callback(self._cleanup_future)
         self._logger.debug("Task submitted", extra={"component": "ThreadController", "pending": len(self._pending)})
         return future
+
+    def pause(self) -> None:
+        """Pause execution of background tasks."""
+
+        self._pause_event.clear()
+        self._logger.info("Background execution paused", extra={"component": "ThreadController"})
+
+    def resume(self) -> None:
+        """Resume execution of background tasks."""
+
+        if not self._pause_event.is_set():
+            self._pause_event.set()
+            self._logger.info("Background execution resumed", extra={"component": "ThreadController"})
+
+    def is_paused(self) -> bool:
+        """Return ``True`` when background execution is paused."""
+
+        return not self._pause_event.is_set()
 
     def cancel_all(self) -> None:
         """Attempt to cancel all pending tasks."""
@@ -276,6 +307,21 @@ class ThreadController:
             if future in self._pending:
                 self._pending.remove(future)
         self._logger.debug("Task finished", extra={"component": "ThreadController", "pending": len(self._pending)})
+
+    @staticmethod
+    def _evaluate_cancel_token(token: Any) -> bool:
+        if callable(token):
+            try:
+                return bool(token())
+            except TypeError:
+                pass
+        for attr in ("is_cancelled", "is_set", "cancelled", "done"):
+            if hasattr(token, attr):
+                value = getattr(token, attr)
+                if callable(value):
+                    return bool(value())
+                return bool(value)
+        return bool(token)
 
     # ------------------------------------------------------------------
     # Qt integration helpers

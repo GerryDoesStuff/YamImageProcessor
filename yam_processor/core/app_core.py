@@ -1,13 +1,16 @@
 """Application core bootstrap handling logging, settings, plugins and threading."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
 import tempfile
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, List, Optional, Sequence
+from typing import Any, Callable, List, Optional, Sequence
 
 from PyQt5 import QtCore  # type: ignore
 
@@ -47,8 +50,104 @@ class AppConfiguration:
     translation_locales: Sequence[str] = ()
     translation_file_prefix: str = "yam_processor"
     enable_update_checks: bool = False
+    update_endpoint: Optional[str] = None
     telemetry_opt_in: bool = False
     telemetry_settings_key: str = "telemetry/opt_in"
+
+
+@dataclass(frozen=True)
+class UpdateMetadata:
+    """Structured representation of update information returned by the endpoint."""
+
+    version: str
+    notes: Optional[str] = None
+    download_url: Optional[str] = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "UpdateMetadata":
+        """Create an :class:`UpdateMetadata` instance from ``payload``.
+
+        The endpoint is expected to return a JSON document containing at least
+        a ``version`` key.  Optional fields such as ``notes`` and
+        ``download_url`` are extracted when present.
+        """
+
+        if "version" not in payload or not payload["version"]:
+            raise ValueError("Update metadata payload is missing a version field")
+
+        version = str(payload["version"])
+        notes = payload.get("notes") or payload.get("release_notes")
+        download_url = payload.get("download_url") or payload.get("url")
+        return cls(
+            version=version,
+            notes=str(notes) if notes is not None else None,
+            download_url=str(download_url) if download_url is not None else None,
+            raw={k: v for k, v in payload.items()},
+        )
+
+
+class UpdateDispatcher:
+    """Coordinate update notifications and acknowledgement hooks."""
+
+    def __init__(
+        self,
+        acknowledge_callback: Callable[[], None],
+        *,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
+        self._listeners: list[Callable[[UpdateMetadata], None]] = []
+        self._acknowledge_callback = acknowledge_callback
+        self._pending = False
+        self._logger = logger or logging.getLogger(__name__)
+
+    def add_listener(self, callback: Callable[[UpdateMetadata], None]) -> None:
+        """Register a listener to be invoked when an update is available."""
+
+        if callback not in self._listeners:
+            self._listeners.append(callback)
+
+    def remove_listener(self, callback: Callable[[UpdateMetadata], None]) -> None:
+        """Unregister a previously registered listener."""
+
+        if callback in self._listeners:
+            self._listeners.remove(callback)
+
+    def notify(self, metadata: UpdateMetadata) -> None:
+        """Notify listeners of ``metadata`` and mark the dispatcher as pending."""
+
+        self._pending = True
+        for callback in list(self._listeners):
+            try:
+                callback(metadata)
+            except Exception:  # pragma: no cover - defensive callback guard
+                self._logger.exception(
+                    "Update listener raised an exception",
+                    extra={"component": "AppCore.UpdateDispatcher"},
+                )
+
+    def acknowledge(self) -> None:
+        """Signal that the pending update notification has been acknowledged."""
+
+        if not self._pending:
+            self._logger.debug(
+                "Acknowledge requested without a pending update",
+                extra={"component": "AppCore.UpdateDispatcher"},
+            )
+            return
+        self._pending = False
+        try:
+            self._acknowledge_callback()
+        except Exception:  # pragma: no cover - defensive callback guard
+            self._logger.exception(
+                "Update acknowledgement callback raised",
+                extra={"component": "AppCore.UpdateDispatcher"},
+            )
+
+    def has_pending_update(self) -> bool:
+        """Return ``True`` when an update notification is pending acknowledgement."""
+
+        return self._pending
 
 
 class AppCore:
@@ -68,6 +167,10 @@ class AppCore:
         self.session_temp_dir: Optional[Path] = None
         self.telemetry_enabled: bool = False
         self.telemetry_setting_key: str = self.config.telemetry_settings_key
+        self._pending_update: Optional[UpdateMetadata] = None
+        self.update_dispatcher = UpdateDispatcher(
+            self._handle_update_acknowledged, logger=self.logger
+        )
 
     def bootstrap(self) -> None:
         """Initialise all core systems."""
@@ -330,6 +433,76 @@ class AppCore:
             "Update check requested",
             extra={"component": "AppCore", "version": version},
         )
+        endpoint = self.config.update_endpoint
+        if not endpoint:
+            self.logger.debug(
+                "No update endpoint configured; skipping check",
+                extra={"component": "AppCore"},
+            )
+            return
+
+        try:
+            with urllib.request.urlopen(endpoint, timeout=10) as response:
+                status = getattr(response, "status", 200)
+                if status >= 400:
+                    self.logger.warning(
+                        "Update endpoint returned error status",
+                        extra={
+                            "component": "AppCore",
+                            "status": status,
+                            "endpoint": endpoint,
+                        },
+                    )
+                    return
+                payload_bytes = response.read()
+        except urllib.error.URLError as exc:
+            self.logger.warning(
+                "Failed to contact update endpoint",
+                extra={"component": "AppCore", "endpoint": endpoint, "error": str(exc)},
+            )
+            return
+
+        try:
+            data = json.loads(payload_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            self.logger.warning(
+                "Update endpoint returned invalid JSON",
+                extra={"component": "AppCore", "endpoint": endpoint, "error": str(exc)},
+            )
+            return
+
+        if not isinstance(data, dict):
+            self.logger.warning(
+                "Update endpoint returned unexpected payload",
+                extra={"component": "AppCore", "endpoint": endpoint, "payload_type": type(data).__name__},
+            )
+            return
+
+        try:
+            metadata = UpdateMetadata.from_payload(data)
+        except ValueError as exc:
+            self.logger.warning(
+                "Update payload missing required fields",
+                extra={"component": "AppCore", "endpoint": endpoint, "error": str(exc)},
+            )
+            return
+
+        if metadata.version == version:
+            self.logger.debug(
+                "Application already at latest version",
+                extra={"component": "AppCore", "version": version},
+            )
+            return
+
+        self.logger.info(
+            "Update available",
+            extra={
+                "component": "AppCore",
+                "current_version": version,
+                "available_version": metadata.version,
+            },
+        )
+        self._handle_update_available(metadata)
 
     def configure_telemetry(self) -> None:
         """Enable telemetry emission when the user has opted in."""
@@ -415,3 +588,33 @@ class AppCore:
             return get_version()
         except Exception:  # pragma: no cover - fallback handling
             return "unknown"
+
+    # ------------------------------------------------------------------
+    # Update handling helpers
+    # ------------------------------------------------------------------
+    def _handle_update_available(self, metadata: UpdateMetadata) -> None:
+        self._pending_update = metadata
+        if self.thread_controller is not None:
+            self.thread_controller.pause()
+        self.update_dispatcher.notify(metadata)
+
+    def _handle_update_acknowledged(self) -> None:
+        if self._pending_update is None:
+            self.logger.debug(
+                "Update acknowledgement received without pending metadata",
+                extra={"component": "AppCore"},
+            )
+            return
+        acknowledged_version = self._pending_update.version
+        self._pending_update = None
+        if self.thread_controller is not None:
+            self.thread_controller.resume()
+        self.logger.info(
+            "Update acknowledgement received",
+            extra={"component": "AppCore", "acknowledged_version": acknowledged_version},
+        )
+
+    def acknowledge_update(self) -> None:
+        """Public helper to acknowledge a pending update notification."""
+
+        self.update_dispatcher.acknowledge()
