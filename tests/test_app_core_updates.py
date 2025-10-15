@@ -1,8 +1,13 @@
 import json
+import sys
 import threading
 from pathlib import Path
 
 import pytest
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # Ensure PyQt stubs from telemetry tests are registered for imports
 from tests import test_app_core_telemetry as _telemetry_stubs  # noqa: F401
@@ -56,7 +61,11 @@ def _create_core(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppCore:
 
 
 def test_update_check_pauses_background_until_ack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = {"version": "2.0.0", "notes": "Bug fixes", "download_url": "https://example.com/app"}
+    payload = {
+        "version": "2.0.0",
+        "release_notes": {"text": "Bug fixes", "url": "https://example.com/changelog"},
+        "download_url": "https://example.com/app",
+    }
 
     def _fake_urlopen(url: str, timeout: float = 10.0) -> _DummyResponse:
         assert url == "https://example.com/update.json"
@@ -65,8 +74,12 @@ def test_update_check_pauses_background_until_ack(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
 
     core = _create_core(tmp_path, monkeypatch)
-    notifications: list[str] = []
-    core.update_dispatcher.add_listener(lambda metadata: notifications.append(metadata.version))
+    notifications: list[object] = []
+
+    def _record_notification(metadata):
+        notifications.append(metadata)
+
+    core.update_dispatcher.add_listener(_record_notification)
 
     core.bootstrap()
 
@@ -74,7 +87,12 @@ def test_update_check_pauses_background_until_ack(tmp_path: Path, monkeypatch: p
         thread_controller = core.thread_controller
         assert thread_controller is not None
         assert thread_controller.is_paused() is True
-        assert notifications == ["2.0.0"]
+        assert len(notifications) == 1
+        metadata = notifications[0]
+        assert metadata.version == "2.0.0"
+        assert metadata.notes == "Bug fixes"
+        assert metadata.release_notes_url == "https://example.com/changelog"
+        assert metadata.download_url == "https://example.com/app"
         assert core.update_dispatcher.has_pending_update() is True
 
         executed = threading.Event()
