@@ -13,6 +13,13 @@ from types import ModuleType
 from typing import Dict, Iterable, Iterator, List, Sequence, Tuple, Type, TypeVar
 
 from yam_processor.plugins.base import ModuleBase, PipelineStage
+from yam_processor.core.signing import (
+    InvalidSignatureError,
+    MissingSignatureError,
+    ModuleSignatureVerifier,
+    SignatureVerificationError,
+    signature_path_for,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -86,6 +93,8 @@ class ModuleLoader:
         self,
         packages: Sequence[str] | None = None,
         module_paths: Sequence[Path | str] | None = None,
+        signature_verifier: ModuleSignatureVerifier | None = None,
+        signature_extension: str = ".sig",
     ) -> None:
         self.packages = list(packages or [])
         self._logger = LOGGER
@@ -93,6 +102,8 @@ class ModuleLoader:
         provided_paths = [Path(path) for path in (module_paths or [])]
         if default_modules_dir not in provided_paths:
             provided_paths.append(default_modules_dir)
+        self._signature_verifier = signature_verifier
+        self._signature_extension = signature_extension
         seen: set[Path] = set()
         self.module_paths: List[Path] = []
         for path in provided_paths:
@@ -177,6 +188,54 @@ class ModuleLoader:
             )
             return None
 
+        if self._signature_verifier is not None:
+            try:
+                module_bytes = file_path.read_bytes()
+            except OSError as exc:  # pragma: no cover - defensive logging path
+                self._logger.warning(
+                    "Failed to read module bytes for signature verification",
+                    extra={
+                        "component": "ModuleLoader",
+                        "module_path": str(file_path),
+                        "error": str(exc),
+                    },
+                )
+                return None
+            try:
+                signature_bytes = self._load_signature(file_path)
+            except MissingSignatureError as exc:
+                self._logger.warning(
+                    "Missing signature for module",
+                    extra={
+                        "component": "ModuleLoader",
+                        "module_path": str(file_path),
+                        "error": str(exc),
+                    },
+                )
+                return None
+            try:
+                self._signature_verifier.verify(module_bytes, signature_bytes)
+            except InvalidSignatureError as exc:
+                self._logger.warning(
+                    "Rejected module due to invalid signature",
+                    extra={
+                        "component": "ModuleLoader",
+                        "module_path": str(file_path),
+                        "error": str(exc),
+                    },
+                )
+                return None
+            except SignatureVerificationError as exc:
+                self._logger.warning(
+                    "Signature verification failed",
+                    extra={
+                        "component": "ModuleLoader",
+                        "module_path": str(file_path),
+                        "error": str(exc),
+                    },
+                )
+                return None
+
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         try:
@@ -198,3 +257,16 @@ class ModuleLoader:
         self._module_index += 1
         stem = file_path.stem.replace("-", "_")
         return f"{self._MODULE_NAMESPACE}.{stem}_{self._module_index}"
+
+    def _load_signature(self, module_path: Path) -> bytes:
+        signature_path = signature_path_for(module_path, self._signature_extension)
+        try:
+            return signature_path.read_bytes()
+        except FileNotFoundError as exc:
+            raise MissingSignatureError(
+                f"Signature file not found at {signature_path}"
+            ) from exc
+        except OSError as exc:  # pragma: no cover - defensive logging path
+            raise SignatureVerificationError(
+                f"Unable to read signature for module {module_path}: {exc}"
+            ) from exc
