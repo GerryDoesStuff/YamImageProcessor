@@ -116,13 +116,63 @@ class _TileFetchRunnable(QtCore.QRunnable):
         self.signals.finished.emit(self.level_index, array, self.request_id)
 
 
+class _InteractiveGraphicsView(QtWidgets.QGraphicsView):
+    """Graphics view that exposes zoom and pan interactions."""
+
+    interactionStarted = QtCore.pyqtSignal()
+    resetRequested = QtCore.pyqtSignal()
+
+    def __init__(self, scene: QtWidgets.QGraphicsScene, parent: Optional[QtWidgets.QWidget]) -> None:
+        super().__init__(scene, parent)
+        self.setDragMode(QtWidgets.QGraphicsView.ScrollHandDrag)
+        self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QtWidgets.QGraphicsView.AnchorViewCenter)
+        self.setViewportUpdateMode(QtWidgets.QGraphicsView.FullViewportUpdate)
+        self.viewport().setCursor(QtCore.Qt.OpenHandCursor)
+
+    def wheelEvent(self, event: QtGui.QWheelEvent) -> None:  # noqa: N802 - Qt override
+        delta = event.angleDelta().y()
+        if delta == 0:
+            event.ignore()
+            return
+        self.interactionStarted.emit()
+        factor = 1.25 if delta > 0 else 0.8
+        current = self.transform().m11()
+        minimum, maximum = 0.05, 20.0
+        new_value = current * factor
+        if new_value < minimum:
+            factor = minimum / current
+        elif new_value > maximum:
+            factor = maximum / current
+        self.scale(factor, factor)
+        event.accept()
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802 - Qt override
+        if event.button() == QtCore.Qt.LeftButton:
+            self.interactionStarted.emit()
+            self.viewport().setCursor(QtCore.Qt.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802 - Qt override
+        if event.button() == QtCore.Qt.LeftButton:
+            self.viewport().setCursor(QtCore.Qt.OpenHandCursor)
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802 - Qt override
+        if event.button() == QtCore.Qt.LeftButton:
+            self.resetRequested.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class PreviewWidget(QtWidgets.QWidget):
     """Display widget that renders tiled images into a ``QGraphicsView``."""
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
         self._scene = QtWidgets.QGraphicsScene(self)
-        self._view = QtWidgets.QGraphicsView(self._scene, self)
+        self._view = _InteractiveGraphicsView(self._scene, self)
         self._view.setRenderHints(
             QtGui.QPainter.Antialiasing
             | QtGui.QPainter.SmoothPixmapTransform
@@ -137,10 +187,13 @@ class PreviewWidget(QtWidgets.QWidget):
         self._pending_levels: List[tuple[int, TiledImageLevel]] = []
         self._active_record: Optional[TiledImageRecord] = None
         self._current_level_index: Optional[int] = None
+        self._auto_fit_enabled = True
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._view)
+        self._view.interactionStarted.connect(self._disable_auto_fit)
+        self._view.resetRequested.connect(self._reset_view)
 
     def set_image(self, record: Optional[TiledImageRecord]) -> None:
         """Render ``record`` or clear the view if ``None`` is supplied."""
@@ -152,17 +205,25 @@ class PreviewWidget(QtWidgets.QWidget):
         self._pending_levels = []
         self._current_level_index = None
         self._request_id += 1
+        self._auto_fit_enabled = True
+        self._view.resetTransform()
         request_id = self._request_id
         if record is None:
             return
 
         ordered_levels = record.ordered_levels()
+        if len(ordered_levels) == 1:
+            array = np.asarray(ordered_levels[0].fetch())
+            self.update_array(array)
+            return
+
         self._pending_levels = list(enumerate(ordered_levels))
         self._start_next_level(request_id)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
-        self._fit_view()
+        if self._auto_fit_enabled:
+            self._fit_view()
 
     def _fit_view(self) -> None:
         if self._current_pixmap is None:
@@ -209,7 +270,8 @@ class PreviewWidget(QtWidgets.QWidget):
         pixmap = QtGui.QPixmap.fromImage(qimage)
         if self._current_pixmap is None:
             self._current_pixmap = self._scene.addPixmap(pixmap)
-            self._fit_view()
+            if self._auto_fit_enabled:
+                self._fit_view()
         else:
             self._current_pixmap.setPixmap(pixmap)
 
@@ -257,6 +319,19 @@ class PreviewWidget(QtWidgets.QWidget):
                 "PreviewWidget", "Unsupported channel count for preview rendering"
             )
         )
+
+    def _disable_auto_fit(self) -> None:
+        self._auto_fit_enabled = False
+
+    def _reset_view(self) -> None:
+        self._auto_fit_enabled = True
+        self._view.resetTransform()
+        self._fit_view()
+
+    def current_array(self) -> Optional[np.ndarray]:
+        if self._image_buffer is None:
+            return None
+        return np.array(self._image_buffer, copy=True)
 
 
 class _PreviewWorkerSignals(QtCore.QObject):

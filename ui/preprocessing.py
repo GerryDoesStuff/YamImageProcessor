@@ -623,6 +623,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._progressive_preview_state: Optional[_ProgressivePreviewState] = None
         self._progressive_generation_counter = 0
         self._active_progressive_generation: Optional[int] = None
+        self._progressive_previous_frame: Optional[np.ndarray] = None
         if self.app_core.thread_controller is None:
             self.app_core.thread_controller = ThreadController(parent=self)
         self.thread_controller: ThreadController = self.app_core.thread_controller
@@ -898,6 +899,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_preview_display_image(self, image: Optional[np.ndarray]) -> None:
         self.preview_display.set_image(self._build_preview_record(image))
 
+    def _update_preview_display_buffer(self, image: Optional[np.ndarray]) -> None:
+        if image is None:
+            self.preview_display.set_image(None)
+            return
+        self.preview_display.update_array(np.asarray(image))
+
+    def _current_preview_array(self) -> Optional[np.ndarray]:
+        if self.current_preview is not None:
+            return np.array(self.current_preview, copy=True)
+        return self.preview_display.current_array()
+
+    def _restore_progressive_baseline(self) -> None:
+        if self._progressive_previous_frame is None:
+            return
+        baseline = np.array(self._progressive_previous_frame, copy=True)
+        self._progressive_previous_frame = None
+        self.preview_display.update_array(baseline)
+
     def set_update_dispatcher(self, dispatcher: UpdateDispatcher) -> None:
         if self._update_dispatcher is dispatcher:
             return
@@ -971,7 +990,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if image_to_use is not None:
             self.committed_image = np.array(image_to_use, copy=True)
             self.current_preview = self.committed_image.copy()
-            self._set_preview_display_image(self.current_preview)
+            self._update_preview_display_buffer(self.current_preview)
             self._preview_signature = snapshot.cache_signature
             if metadata:
                 self._last_pipeline_metadata = metadata
@@ -1020,7 +1039,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if image_to_use is not None:
             self.committed_image = np.array(image_to_use, copy=True)
             self.current_preview = self.committed_image.copy()
-            self._set_preview_display_image(self.current_preview)
+            self._update_preview_display_buffer(self.current_preview)
             self._preview_signature = snapshot.cache_signature
             if metadata:
                 self._last_pipeline_metadata = metadata
@@ -1731,6 +1750,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_progressive_generation = None
         self._progressive_preview_state = None
         self._pending_preview_signature = None
+        self._restore_progressive_baseline()
         self._active_task_id = None
 
     @QtCore.pyqtSlot(Exception, str)
@@ -1767,6 +1787,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_progressive_generation = None
         self._progressive_preview_state = None
         self._pending_preview_signature = None
+        self._restore_progressive_baseline()
         self._active_task_id = None
 
     def _ensure_source_registered(self, image: np.ndarray) -> Optional[str]:
@@ -1805,6 +1826,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._progressive_generation_counter += 1
         generation = self._progressive_generation_counter
         self._active_progressive_generation = generation
+        self._progressive_previous_frame = self._current_preview_array()
 
         def _handle_finished(result: PipelineCacheResult) -> None:
             if self._active_progressive_generation != generation:
@@ -1812,6 +1834,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_progressive_generation = None
             self._progressive_preview_state = None
             self._pending_preview_signature = None
+            self._progressive_previous_frame = None
             if on_finished is not None:
                 on_finished(result)
 
@@ -1820,6 +1843,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._active_progressive_generation = None
                 self._progressive_preview_state = None
                 self._pending_preview_signature = None
+                self._restore_progressive_baseline()
             if on_canceled is not None:
                 on_canceled()
 
@@ -1870,7 +1894,14 @@ class MainWindow(QtWidgets.QMainWindow):
             or state.signature != update.final_signature
             or state.shape != shape
         ):
-            buffer = np.zeros(shape, dtype=update.dtype)
+            baseline = self._progressive_previous_frame
+            if baseline is not None and baseline.shape == shape:
+                if baseline.dtype != update.dtype:
+                    buffer = baseline.astype(update.dtype, copy=True)
+                else:
+                    buffer = np.array(baseline, copy=True)
+            else:
+                buffer = np.zeros(shape, dtype=update.dtype)
             state = _ProgressivePreviewState(
                 signature=update.final_signature,
                 shape=shape,
@@ -1913,12 +1944,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_preview_from_result(self, result: PipelineCacheResult) -> None:
         self._preview_signature = result.final_signature
         self.current_preview = result.image.copy()
-        self._set_preview_display_image(self.current_preview)
+        self._update_preview_display_buffer(self.current_preview)
 
     def _update_committed_from_result(self, result: PipelineCacheResult) -> None:
         self.committed_image = result.image.copy()
         self.current_preview = self.committed_image.copy()
-        self._set_preview_display_image(self.current_preview)
+        self._update_preview_display_buffer(self.current_preview)
         self._committed_signature = result.final_signature
         self._preview_signature = result.final_signature
         self._last_pipeline_metadata = result.metadata
@@ -2190,6 +2221,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.original_image = image.copy()
             self.base_image = image.copy()
             self.committed_image = image.copy()
+            self.current_preview = image.copy()
             self.current_image_path = str(path)
             self._source_id = self.pipeline_cache.register_source(
                 self.base_image, hint=str(path)
@@ -2275,7 +2307,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if cached is not None:
             self._preview_signature = final_signature
             self.current_preview = cached.copy()
-            self._set_preview_display_image(self.current_preview)
+            self._update_preview_display_buffer(self.current_preview)
             return
         self._apply_pipeline_async(
             description="Updating preview",
@@ -2314,7 +2346,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if cached is not None:
             self._preview_signature = final_signature
             self.current_preview = cached.copy()
-            self._set_preview_display_image(self.current_preview)
+            self._update_preview_display_buffer(self.current_preview)
             return
         self._apply_pipeline_async(
             pipeline=temp_manager,
@@ -2351,7 +2383,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _cancel() -> None:
             if backup is not None:
-                self._set_preview_display_image(backup)
+                self._update_preview_display_buffer(backup)
             elif self.base_image is not None:
                 self.update_preview()
 
@@ -2389,7 +2421,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _cancel() -> None:
             if backup is not None:
-                self._set_preview_display_image(backup)
+                self._update_preview_display_buffer(backup)
             elif self.base_image is not None:
                 self.update_preview()
 
@@ -2432,7 +2464,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _cancel() -> None:
             if backup is not None:
-                self._set_preview_display_image(backup)
+                self._update_preview_display_buffer(backup)
             elif self.base_image is not None:
                 self.update_preview()
 
@@ -2473,7 +2505,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _cancel() -> None:
             if backup is not None:
-                self._set_preview_display_image(backup)
+                self._update_preview_display_buffer(backup)
             elif self.base_image is not None:
                 self.update_preview()
 

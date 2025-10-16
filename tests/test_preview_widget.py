@@ -6,9 +6,14 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-PyQt5 = pytest.importorskip("PyQt5")
-QtCore = PyQt5.QtCore
+QtCore = pytest.importorskip("PyQt5.QtCore", exc_type=ImportError)
+QtGui = pytest.importorskip("PyQt5.QtGui", exc_type=ImportError)
+QtWidgets = pytest.importorskip("PyQt5.QtWidgets", exc_type=ImportError)
 
+pytest.importorskip("cv2", exc_type=ImportError)
+
+from processing.pipeline_cache import PipelineCacheTileUpdate
+from ui.preprocessing import MainWindow
 from yam_processor.ui import PreviewWidget, TiledImageLevel, TiledImageRecord
 
 np = pytest.importorskip("numpy")
@@ -43,8 +48,128 @@ def test_preview_widget_progressive_loading(qtbot) -> None:
         and widget._image_buffer.shape == high.shape,
         timeout=2000,
     )
+
+
+def test_preview_widget_eager_path_for_single_level(qtbot) -> None:
+    widget = PreviewWidget()
+    qtbot.addWidget(widget)
+
+    eager_called = False
+
+    def fetch() -> np.ndarray:
+        nonlocal eager_called
+        eager_called = True
+        return np.full((32, 32, 3), 255, dtype=np.uint8)
+
+    record = TiledImageRecord([TiledImageLevel(scale=1.0, fetch=fetch)])
+    widget.set_image(record)
+
+    assert eager_called
+    assert widget._pending_levels == []
+    qtbot.waitUntil(lambda: widget._image_buffer is not None, timeout=500)
     assert widget._image_buffer is not None
-    assert widget._image_buffer.shape == high.shape
+    assert widget._image_buffer.shape == (32, 32, 3)
+
+
+def _send_wheel_event(view: QtWidgets.QGraphicsView, delta: int) -> None:
+    viewport = view.viewport()
+    position = QtCore.QPointF(viewport.rect().center())
+    event = QtGui.QWheelEvent(
+        position,
+        position,
+        QtCore.QPoint(0, delta),
+        QtCore.QPoint(0, delta),
+        delta,
+        QtCore.Qt.Vertical,
+        QtCore.Qt.NoButton,
+        QtCore.Qt.NoModifier,
+        QtCore.Qt.ScrollUpdate,
+        False,
+    )
+    QtWidgets.QApplication.sendEvent(viewport, event)
+
+
+def test_preview_widget_zoom_persists_during_updates(qtbot) -> None:
+    widget = PreviewWidget()
+    qtbot.addWidget(widget)
+
+    base = np.full((64, 64, 3), 180, dtype=np.uint8)
+    record = TiledImageRecord([TiledImageLevel(scale=1.0, fetch=lambda: base.copy())])
+    widget.set_image(record)
+    qtbot.waitUntil(lambda: widget._image_buffer is not None, timeout=500)
+
+    initial_scale = widget._view.transform().m11()
+    _send_wheel_event(widget._view, 120)
+    qtbot.waitUntil(lambda: widget._view.transform().m11() > initial_scale, timeout=500)
+    zoomed_scale = widget._view.transform().m11()
+
+    widget.update_array(np.full((64, 64, 3), 30, dtype=np.uint8))
+    assert pytest.approx(widget._view.transform().m11(), rel=1e-6) == zoomed_scale
+
+
+def _make_preview_window_stub(qtbot) -> MainWindow:
+    window = MainWindow.__new__(MainWindow)
+    QtWidgets.QMainWindow.__init__(window)
+    display = PreviewWidget()
+    qtbot.addWidget(display)
+    window.preview_display = display
+    window.current_preview = None
+    window._progressive_previous_frame = None
+    window._progressive_preview_state = None
+    window._pending_preview_signature = None
+    window._active_progressive_generation = None
+    window._progressive_generation_counter = 0
+    return window
+
+
+def test_progressive_cancel_restores_large_frame(qtbot) -> None:
+    window = _make_preview_window_stub(qtbot)
+    baseline = np.full((8, 8), 20, dtype=np.uint8)
+    window.current_preview = baseline.copy()
+    window.preview_display.update_array(baseline)
+    window._progressive_previous_frame = baseline.copy()
+    window._pending_preview_signature = "sig"
+    window._active_progressive_generation = 1
+
+    update = PipelineCacheTileUpdate(
+        source_id="src",
+        final_signature="sig",
+        step_signature="sig",
+        step_index=1,
+        total_steps=1,
+        box=(0, 0, 4, 4),
+        tile=np.full((4, 4), 200, dtype=np.uint8),
+        shape=baseline.shape,
+        dtype=np.dtype(np.uint8),
+        tile_size=None,
+        from_cache=False,
+    )
+    window._handle_pipeline_incremental_update(update, 1)
+    qtbot.waitUntil(
+        lambda: window.preview_display._image_buffer is not None
+        and np.array_equal(window.preview_display._image_buffer[:4, :4], np.full((4, 4), 200)),
+        timeout=500,
+    )
+
+    window._restore_progressive_baseline()
+    restored = window.preview_display.current_array()
+    assert restored is not None
+    assert np.array_equal(restored, baseline)
+
+
+def test_progressive_cancel_restores_eager_frame(qtbot) -> None:
+    window = _make_preview_window_stub(qtbot)
+    baseline = np.full((4, 4, 3), 90, dtype=np.uint8)
+    window.current_preview = baseline.copy()
+    window.preview_display.update_array(baseline)
+    window._progressive_previous_frame = baseline.copy()
+
+    window.preview_display.update_array(np.full((4, 4, 3), 10, dtype=np.uint8))
+    window._restore_progressive_baseline()
+
+    restored = window.preview_display.current_array()
+    assert restored is not None
+    assert np.array_equal(restored, baseline)
 
 
 def test_preview_widget_remains_responsive_with_large_sources(qtbot) -> None:
