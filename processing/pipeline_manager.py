@@ -1,12 +1,47 @@
 """Utilities for managing ordered image processing pipelines."""
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Protocol, Tuple
 
 import numpy as np
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class StepExecutionMetadata:
+    """Hints influencing how a :class:`PipelineStep` should be executed."""
+
+    supports_inplace: bool = False
+    requires_gpu: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "supports_inplace": self.supports_inplace,
+            "requires_gpu": self.requires_gpu,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "StepExecutionMetadata":
+        return cls(
+            supports_inplace=bool(data.get("supports_inplace", False)),
+            requires_gpu=bool(data.get("requires_gpu", False)),
+        )
+
+    def is_default(self) -> bool:
+        return not (self.supports_inplace or self.requires_gpu)
+
+
+class GpuExecutor(Protocol):
+    """Protocol describing helpers capable of executing GPU steps."""
+
+    def execute(self, step: "PipelineStep", image: np.ndarray) -> np.ndarray:
+        """Execute ``step`` using an accelerator backend."""
 
 
 @dataclass
@@ -17,13 +52,24 @@ class PipelineStep:
     function: Callable[..., np.ndarray]
     enabled: bool = True
     params: Dict[str, Any] = field(default_factory=dict)
+    execution: StepExecutionMetadata = field(default_factory=StepExecutionMetadata)
 
     def apply(self, image: np.ndarray) -> np.ndarray:
         """Execute the processing step if enabled."""
 
         if not self.enabled:
             return image
-        return self.function(image, **self.params)
+        result = self.function(image, **self.params)
+        if result is None:
+            return image
+        if self.execution.supports_inplace:
+            if result is image:
+                return image
+            if isinstance(result, np.ndarray) and result.shape == image.shape:
+                if result.dtype == image.dtype:
+                    image[...] = result
+                    return image
+        return result
 
     def clone(self) -> "PipelineStep":
         """Return a deep copy of the step."""
@@ -33,14 +79,35 @@ class PipelineStep:
             function=self.function,
             enabled=self.enabled,
             params=dict(self.params),
+            execution=StepExecutionMetadata(
+                supports_inplace=self.execution.supports_inplace,
+                requires_gpu=self.execution.requires_gpu,
+            ),
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload: Dict[str, Any] = {
             "name": self.name,
             "enabled": self.enabled,
             "params": dict(self.params),
         }
+        if not self.execution.is_default():
+            payload["execution"] = self.execution.to_dict()
+        return payload
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: Dict[str, Any],
+        function: Callable[..., np.ndarray],
+    ) -> "PipelineStep":
+        return cls(
+            name=data["name"],
+            function=function,
+            enabled=bool(data.get("enabled", True)),
+            params=dict(data.get("params", {})),
+            execution=StepExecutionMetadata.from_dict(data.get("execution", {})),
+        )
 
 
 @dataclass
@@ -71,6 +138,7 @@ class PipelineManager:
         *,
         cache_dir: Optional[os.PathLike[str] | str] = None,
         recovery_root: Optional[os.PathLike[str] | str] = None,
+        gpu_executor: Optional[GpuExecutor] = None,
     ) -> None:
         template = [step.clone() for step in steps or []]
         self._template: List[PipelineStep] = template
@@ -79,6 +147,7 @@ class PipelineManager:
         self._redo_stack: List[PipelineState] = []
         self._cache_directory: Optional[Path] = None
         self._recovery_root: Optional[Path] = None
+        self._gpu_executor: Optional[GpuExecutor] = gpu_executor
         self.set_cache_directory(cache_dir if cache_dir is not None else self._DEFAULT_CACHE_DIR)
         self.set_recovery_root(
             recovery_root if recovery_root is not None else self._DEFAULT_RECOVERY_ROOT
@@ -136,6 +205,7 @@ class PipelineManager:
             self._template,
             cache_dir=self._cache_directory,
             recovery_root=self._recovery_root,
+            gpu_executor=self._gpu_executor,
         )
         clone._steps = [step.clone() for step in self._steps]
         return clone
@@ -150,6 +220,11 @@ class PipelineManager:
     def clear_history(self) -> None:
         self._undo_stack.clear()
         self._redo_stack.clear()
+
+    def set_gpu_executor(self, executor: Optional[GpuExecutor]) -> None:
+        """Configure the accelerator used for GPU-marked steps."""
+
+        self._gpu_executor = executor
 
     def replace_steps(
         self,
@@ -234,8 +309,19 @@ class PipelineManager:
     def apply(self, image: np.ndarray) -> np.ndarray:
         result = image.copy()
         for step in self.iter_enabled_steps():
-            result = step.apply(result)
+            result = self._run_step(step, result)
         return result
+
+    def _run_step(self, step: PipelineStep, image: np.ndarray) -> np.ndarray:
+        if step.execution.requires_gpu and self._gpu_executor is not None:
+            return self._gpu_executor.execute(step, image)
+
+        if step.execution.requires_gpu and self._gpu_executor is None:
+            LOGGER.warning(
+                "Step '%s' requires GPU execution but no executor is configured; falling back to CPU.",
+                step.name,
+            )
+        return step.apply(image)
 
     # ------------------------------------------------------------------
     # History support
@@ -298,8 +384,10 @@ class PipelineManager:
 
 
 __all__ = [
+    "GpuExecutor",
     "PipelineManager",
     "PipelineState",
     "PipelineStep",
+    "StepExecutionMetadata",
 ]
 
