@@ -9,10 +9,11 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
 import cv2
 import numpy as np
+from PIL import Image
 
 from .path_sanitizer import (
     PathValidationError,
@@ -21,6 +22,7 @@ from .path_sanitizer import (
     sanitize_user_path,
 )
 from .settings import SettingsManager
+from .tiled_image import TiledImageRecord
 
 
 class PersistenceError(RuntimeError):
@@ -154,8 +156,14 @@ class IOManager:
         source: str | os.PathLike[str],
         *,
         read_metadata: bool = True,
-    ) -> Tuple[np.ndarray, Optional[Dict[str, Any]]]:
-        """Load an image array and optional metadata sidecar."""
+        lazy: bool = False,
+    ) -> Tuple[Union[np.ndarray, TiledImageRecord], Optional[Dict[str, Any]]]:
+        """Load an image array and optional metadata sidecar.
+
+        When ``lazy`` is ``True`` a :class:`~core.tiled_image.TiledImageRecord`
+        is returned instead of an eager :class:`numpy.ndarray`, allowing pixel
+        data to be streamed on demand.
+        """
 
         try:
             path = sanitize_user_path(
@@ -174,12 +182,34 @@ class IOManager:
             raise PersistenceError(f"Unsupported image format '{path.suffix}'.")
 
         if ext == ".npy":
-            image = np.load(path, allow_pickle=False)
+            if lazy:
+                memmap = np.load(path, mmap_mode="r", allow_pickle=False)
+                metadata = {
+                    "format": "NPY",
+                    "dtype": str(memmap.dtype),
+                    "shape": tuple(memmap.shape),
+                }
+                image: Union[np.ndarray, TiledImageRecord] = TiledImageRecord.from_npy(
+                    path, metadata=metadata, memmap=memmap
+                )
+            else:
+                image = np.load(path, allow_pickle=False)
         else:
-            array = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-            if array is None:
-                raise PersistenceError(f"Failed to load image from '{path}'.")
-            image = array
+            if lazy:
+                pillow_image = Image.open(path)
+                metadata = {
+                    "format": pillow_image.format,
+                    "mode": pillow_image.mode,
+                    "size": pillow_image.size,
+                }
+                image = TiledImageRecord.from_raster(
+                    path, metadata=metadata, image=pillow_image
+                )
+            else:
+                array = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+                if array is None:
+                    raise PersistenceError(f"Failed to load image from '{path}'.")
+                image = array
 
         metadata_payload: Optional[Dict[str, Any]] = None
         if read_metadata:
@@ -327,4 +357,4 @@ class IOManager:
                     pass
 
 
-__all__ = ["IOManager", "SaveResult", "PersistenceError"]
+__all__ = ["IOManager", "SaveResult", "PersistenceError", "TiledImageRecord"]
