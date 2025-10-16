@@ -2,15 +2,43 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
+import sys
+import types
+import importlib.util
 
 import pytest
 
-from yam_processor.processing.pipeline_manager import (
-    PipelineExecutionError,
-    PipelineFailure,
-    PipelineManager,
-    PipelineStep,
+from core.tiled_image import TiledImageRecord
+from processing.tiled_records import TiledPipelineImage
+
+ROOT = Path(__file__).resolve().parents[1]
+
+if "yam_processor" not in sys.modules:
+    yam_pkg = types.ModuleType("yam_processor")
+    yam_pkg.__path__ = []  # type: ignore[attr-defined]
+    sys.modules["yam_processor"] = yam_pkg
+else:
+    yam_pkg = sys.modules["yam_processor"]
+
+processing_pkg = types.ModuleType("yam_processor.processing")
+processing_pkg.__path__ = []  # type: ignore[attr-defined]
+sys.modules["yam_processor.processing"] = processing_pkg
+setattr(yam_pkg, "processing", processing_pkg)
+
+spec = importlib.util.spec_from_file_location(
+    "yam_processor.processing.pipeline_manager",
+    ROOT / "yam_processor" / "processing" / "pipeline_manager.py",
 )
+assert spec and spec.loader is not None
+pipeline_module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = pipeline_module
+spec.loader.exec_module(pipeline_module)
+setattr(processing_pkg, "pipeline_manager", pipeline_module)
+
+PipelineExecutionError = pipeline_module.PipelineExecutionError
+PipelineFailure = pipeline_module.PipelineFailure
+PipelineManager = pipeline_module.PipelineManager
+PipelineStep = pipeline_module.PipelineStep
 
 try:
     np = importlib.import_module("numpy")
@@ -19,6 +47,7 @@ except ModuleNotFoundError:
 
 if not hasattr(np, "float32"):
     pytest.skip("numpy installation is incomplete", allow_module_level=True)
+
 
 
 def _add_value(image, *, value: float):
@@ -33,12 +62,35 @@ def _explode(image):
     raise RuntimeError("kaboom")
 
 
+def _tiled_passthrough(image, *, offset: float = 0.0):
+    assert isinstance(image, TiledPipelineImage)
+    tiles = list(image.iter_tiles(image.tile_size))
+    assert tiles, "expected tiled iterator to yield at least one region"
+    if offset:
+        return image.to_array() + offset
+    return image
+
+
 @pytest.fixture()
 def sample_image():
     assert hasattr(np, "float32")
     return np.array(
         [[0.0, 1.0, 2.0], [3.0, 4.0, 5.0], [6.0, 7.0, 8.0]], dtype=np.float32
     )
+
+
+@pytest.fixture()
+def tiled_pipeline_image(tmp_path: Path):
+    array = np.arange(16, dtype=np.float32).reshape(4, 4)
+    path = tmp_path / "lazy.npy"
+    np.save(path, array, allow_pickle=False)
+    memmap = np.load(path, mmap_mode="r", allow_pickle=False)
+    record = TiledImageRecord.from_npy(path, metadata={"format": "NPY"}, memmap=memmap)
+    pipeline_record = TiledPipelineImage(record, tile_size=(2, 2))
+    try:
+        yield pipeline_record, array
+    finally:
+        pipeline_record.close()
 
 
 def test_pipeline_execution_history_and_redo(tmp_path: Path, sample_image) -> None:
@@ -105,3 +157,27 @@ def test_pipeline_failure_records_last_failure(tmp_path: Path, sample_image) -> 
     assert failure.recovery_path.exists()
     assert "RuntimeError" in failure.recovery_path.read_text(encoding="utf-8")
     assert manager.get_step("explode").enabled is False
+
+
+def test_pipeline_materialises_tiled_records_when_step_lacks_support(
+    tiled_pipeline_image,
+) -> None:
+    record, array = tiled_pipeline_image
+    manager = PipelineManager([PipelineStep("add", _add_value, params={"value": 1.0})])
+
+    result = manager.apply(record)
+
+    assert isinstance(result, np.ndarray)
+    np.testing.assert_allclose(result, array + 1.0)
+
+
+def test_pipeline_preserves_tiled_records_for_supported_steps(tiled_pipeline_image) -> None:
+    record, array = tiled_pipeline_image
+    manager = PipelineManager(
+        [PipelineStep("noop", _tiled_passthrough, supports_tiled_input=True)]
+    )
+
+    result = manager.apply(record)
+
+    assert result is record
+    np.testing.assert_allclose(record.to_array(), array)

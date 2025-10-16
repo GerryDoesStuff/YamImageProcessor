@@ -8,6 +8,7 @@ from .pipeline_manager import (
     PipelineStep,
     StepExecutionMetadata,
 )
+from processing.tiled_records import TileSize, TiledPipelineImage
 
 __all__ = [
     "GpuExecutor",
@@ -16,4 +17,6 @@ __all__ = [
     "PipelineManager",
     "PipelineStep",
     "StepExecutionMetadata",
+    "TileSize",
+    "TiledPipelineImage",
 ]

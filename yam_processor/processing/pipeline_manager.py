@@ -13,12 +13,17 @@ import traceback
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Protocol
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Protocol, Union
 
 import numpy as np
 
+from processing.tiled_records import TiledPipelineImage
+
 
 LOGGER = logging.getLogger(__name__)
+
+
+PipelineImage = Union[np.ndarray, TiledPipelineImage]
 
 
 @dataclass
@@ -79,7 +84,9 @@ class PipelineStep:
     name:
         Human readable identifier for the step. Used for serialisation and UI.
     function:
-        Callable that accepts an ``np.ndarray`` and returns a processed copy.
+        Callable that accepts either an :class:`numpy.ndarray` or a
+        :class:`~processing.tiled_records.TiledPipelineImage` and returns the
+        processed result.
     enabled:
         Flag controlling whether the step should be executed when applying the
         pipeline.
@@ -94,12 +101,13 @@ class PipelineStep:
     """
 
     name: str
-    function: Callable[..., np.ndarray]
+    function: Callable[..., PipelineImage]
     enabled: bool = True
     params: Dict[str, Any] = field(default_factory=dict)
     execution: StepExecutionMetadata = field(default_factory=StepExecutionMetadata)
+    supports_tiled_input: bool = False
 
-    def apply(self, image: np.ndarray) -> np.ndarray:
+    def apply(self, image: PipelineImage) -> PipelineImage:
         """Execute the step against ``image`` if it is enabled."""
 
         if not self.enabled:
@@ -109,17 +117,23 @@ class PipelineStep:
             LOGGER.debug(
                 "Step '%s' marked for GPU execution; executing on CPU fallback", self.name
             )
+        operand = image
+        if isinstance(image, TiledPipelineImage) and not self.supports_tiled_input:
+            LOGGER.debug(
+                "Step '%s' requires dense input; materialising tiled record", self.name
+            )
+            operand = image.to_array()
         LOGGER.debug("Applying step '%s' with params %s", self.name, self.params)
-        result = self.function(image, **self.params)
+        result = self.function(operand, **self.params)
         if result is None:
-            result = image
+            result = operand
         if self.execution.supports_inplace:
-            if result is image:
-                return image
-            if isinstance(result, np.ndarray) and result.shape == image.shape:
-                if result.dtype == image.dtype:
-                    image[...] = result
-                    return image
+            if isinstance(operand, np.ndarray) and isinstance(result, np.ndarray):
+                if result is operand:
+                    return operand
+                if result.shape == operand.shape and result.dtype == operand.dtype:
+                    operand[...] = result
+                    return operand
         return result
 
     def clone(self) -> "PipelineStep":
@@ -134,6 +148,7 @@ class PipelineStep:
                 supports_inplace=self.execution.supports_inplace,
                 requires_gpu=self.execution.requires_gpu,
             ),
+            supports_tiled_input=self.supports_tiled_input,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -146,13 +161,15 @@ class PipelineStep:
         }
         if not self.execution.is_default():
             payload["execution"] = self.execution.to_dict()
+        if self.supports_tiled_input:
+            payload["supports_tiled_input"] = True
         return payload
 
     @classmethod
     def from_dict(
         cls,
         data: Dict[str, Any],
-        function_resolver: Callable[[str], Callable[..., np.ndarray]],
+        function_resolver: Callable[[str], Callable[..., PipelineImage]],
     ) -> "PipelineStep":
         """Create a :class:`PipelineStep` from a serialised representation.
 
@@ -173,6 +190,7 @@ class PipelineStep:
             enabled=bool(data.get("enabled", True)),
             params=copy.deepcopy(data.get("params", {})),
             execution=StepExecutionMetadata.from_dict(data.get("execution", {})),
+            supports_tiled_input=bool(data.get("supports_tiled_input", False)),
         )
 
 
@@ -590,11 +608,11 @@ class PipelineManager:
     # ------------------------------------------------------------------
     def apply(
         self,
-        image: np.ndarray,
+        image: PipelineImage,
         *,
         cache_threshold_bytes: int = DEFAULT_CACHE_THRESHOLD_BYTES,
         cache_dir: Optional[os.PathLike[str] | str] = None,
-    ) -> np.ndarray:
+    ) -> PipelineImage:
         """Execute the pipeline against ``image`` returning the processed copy.
 
         While executing, intermediate step outputs are cached so that undo/redo
@@ -603,7 +621,7 @@ class PipelineManager:
         storage. ``cache_dir`` can be used to redirect disk backed artefacts.
         """
 
-        processed = image.copy()
+        processed: PipelineImage = image.copy() if isinstance(image, np.ndarray) else image
         intermediates: Dict[str, CachedArray] = {}
         self._last_failure = None
         cache_directory = os.fspath(cache_dir) if cache_dir is not None else self._cache_dir
@@ -626,13 +644,15 @@ class PipelineManager:
                 )
                 raise PipelineExecutionError(failure) from exc
 
+            cache_ready = processed if isinstance(processed, np.ndarray) else processed.to_array()
             intermediates[step.name] = CachedArray.from_array(
-                processed,
+                cache_ready,
                 threshold_bytes=cache_threshold_bytes,
                 cache_dir=cache_directory,
             )
+        final_array = processed if isinstance(processed, np.ndarray) else processed.to_array()
         final_cache = CachedArray.from_optional(
-            processed,
+            final_array,
             threshold_bytes=cache_threshold_bytes,
             cache_dir=cache_directory,
         )
@@ -644,44 +664,32 @@ class PipelineManager:
         self._last_execution_entry = entry.clone()
         return processed
 
-    def _run_step(self, step: PipelineStep, image: np.ndarray) -> np.ndarray:
+    def _run_step(self, step: PipelineStep, image: PipelineImage) -> PipelineImage:
         """Execute ``step`` honouring execution metadata."""
 
         if not step.enabled:
             return image
 
         if step.execution.requires_gpu:
+            array_input = image if isinstance(image, np.ndarray) else image.to_array()
             if self._gpu_executor is None:
                 LOGGER.warning(
                     "Step '%s' requires GPU execution but no executor is configured; falling back to CPU.",
                     step.name,
                 )
-                # TODO(gpu): Swap this temporary branch for the unified GPU
-                # dispatcher outlined in docs/performance_roadmap.md once the
-                # executor can invoke OpenCV/scikit-image kernels directly.
-                result = step.function(image, **step.params)
-            else:
-                result = self._gpu_executor.execute(step, image)
-        else:
-            result = step.function(image, **step.params)
-
-        if result is None:
-            result = image
-
-        if step.execution.supports_inplace:
-            if result is image:
-                return image
-            if isinstance(result, np.ndarray) and result.shape == image.shape:
-                if image.dtype == result.dtype:
-                    image[...] = result
-                    return image
-            LOGGER.debug(
-                "Step '%s' advertised in-place support but returned incompatible buffer; using returned value.",
-                step.name,
-            )
+                return step.apply(array_input)
+            result = self._gpu_executor.execute(step, array_input)
+            if result is None:
+                result = array_input
+            if step.execution.supports_inplace and isinstance(result, np.ndarray):
+                if result is array_input:
+                    return array_input
+                if result.shape == array_input.shape and result.dtype == array_input.dtype:
+                    array_input[...] = result
+                    return array_input
             return result
 
-        return result
+        return step.apply(image)
 
     def last_failure(self) -> Optional[PipelineFailure]:
         """Return the most recent pipeline failure, if any."""

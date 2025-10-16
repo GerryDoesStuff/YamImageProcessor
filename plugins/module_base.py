@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence, Tuple
 import numpy as np
 
 from processing.pipeline_manager import PipelineStep, StepExecutionMetadata
+from processing.tiled_records import TiledPipelineImage
 
 if TYPE_CHECKING:  # pragma: no cover - only used for typing
     from ui.preprocessing import MainWindow
@@ -124,6 +125,11 @@ class ModuleBase(ABC):
 
         return StepExecutionMetadata()
 
+    def supports_tiled_input(self) -> bool:
+        """Return ``True`` if the module can process tiled image handles."""
+
+        return False
+
     def create_pipeline_step(self) -> PipelineStep:
         """Create a :class:`PipelineStep` template for this module."""
 
@@ -133,10 +139,13 @@ class ModuleBase(ABC):
             enabled=self.metadata.default_enabled,
             params=self.default_parameters(),
             execution=self.pipeline_execution_metadata(),
+            supports_tiled_input=self.supports_tiled_input(),
         )
 
     @abstractmethod
-    def process(self, image: np.ndarray, **kwargs: Any) -> np.ndarray:
+    def process(
+        self, image: np.ndarray | TiledPipelineImage, **kwargs: Any
+    ) -> np.ndarray | TiledPipelineImage:
         """Execute the module's processing logic."""
 
     # ------------------------------------------------------------------
