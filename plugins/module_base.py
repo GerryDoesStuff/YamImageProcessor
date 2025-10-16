@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence, Tuple
 
 import numpy as np
 
-from processing.pipeline_manager import PipelineStep
+from processing.pipeline_manager import PipelineStep, StepExecutionMetadata
 
 if TYPE_CHECKING:  # pragma: no cover - only used for typing
     from ui.preprocessing import MainWindow
@@ -119,6 +119,11 @@ class ModuleBase(ABC):
                 sanitised[name] = metadata.coerce(sanitised[name])
         return sanitised
 
+    def pipeline_execution_metadata(self) -> StepExecutionMetadata:
+        """Return execution hints for the module's pipeline step."""
+
+        return StepExecutionMetadata()
+
     def create_pipeline_step(self) -> PipelineStep:
         """Create a :class:`PipelineStep` template for this module."""
 
@@ -127,6 +132,7 @@ class ModuleBase(ABC):
             function=self.process,
             enabled=self.metadata.default_enabled,
             params=self.default_parameters(),
+            execution=self.pipeline_execution_metadata(),
         )
 
     @abstractmethod
