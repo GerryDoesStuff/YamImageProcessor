@@ -8,7 +8,7 @@ import threading
 import traceback
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -35,44 +35,12 @@ from ui.theme import (
     scale_font,
 )
 
+from yam_processor.ui import PreviewWidget, TiledImageLevel, TiledImageRecord
 from yam_processor.ui.error_reporter import ErrorResolution, present_error_report
 from yam_processor.ui.diagnostics_panel import DiagnosticsPanel
 
 
 LOGGER = logging.getLogger(__name__)
-
-
-class ImageDisplayWidget(QtWidgets.QLabel):
-    def __init__(self, use_rgb_format: bool = False):
-        super().__init__()
-        self.setAlignment(QtCore.Qt.AlignCenter)
-        self._pixmap: Optional[QtGui.QPixmap] = None
-        self.use_rgb_format = use_rgb_format
-        self.setMinimumSize(1, 1)
-
-    def set_image(self, image: np.ndarray):
-        if len(image.shape) == 2:
-            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        if self.use_rgb_format:
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        height, width, channels = image.shape
-        bytes_per_line = channels * width
-        qimage = QtGui.QImage(image.data.tobytes(), width, height, bytes_per_line, QtGui.QImage.Format_RGB888)
-        self._pixmap = QtGui.QPixmap.fromImage(qimage)
-        self.update_pixmap()
-
-    def update_pixmap(self):
-        if self._pixmap:
-            scaled = self._pixmap.scaled(self.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-            self.setPixmap(scaled)
-        else:
-            self.setPixmap(QtGui.QPixmap())
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.update_pixmap()
-
-
 class UpdateNotificationDialog(QtWidgets.QDialog):
     """Simple dialog presenting update notes and helpful links."""
 
@@ -647,29 +615,19 @@ class MainWindow(QtWidgets.QMainWindow):
         original_section.setObjectName("originalImageSection")
         original_section.setAccessibleName("Original image panel")
         original_layout = original_section.layout
-        self.original_display = ImageDisplayWidget(use_rgb_format=True)
+        self.original_display = PreviewWidget(original_section)
         self.original_display.setObjectName("originalImageDisplay")
         self.original_display.setFocusPolicy(QtCore.Qt.StrongFocus)
-        orig_scroll = QtWidgets.QScrollArea(original_section)
-        orig_scroll.setWidgetResizable(True)
-        orig_scroll.setWidget(self.original_display)
-        orig_scroll.setObjectName("originalImageScrollArea")
-        orig_scroll.setFocusPolicy(QtCore.Qt.StrongFocus)
-        original_layout.addWidget(orig_scroll, 1)
+        original_layout.addWidget(self.original_display, 1)
 
         preview_section = SectionWidget("Pre-Processing Preview", self.image_splitter)
         preview_section.setObjectName("previewImageSection")
         preview_section.setAccessibleName("Pre-processing preview panel")
         preview_layout = preview_section.layout
-        self.preview_display = ImageDisplayWidget(use_rgb_format=False)
+        self.preview_display = PreviewWidget(preview_section)
         self.preview_display.setObjectName("previewImageDisplay")
         self.preview_display.setFocusPolicy(QtCore.Qt.StrongFocus)
-        prev_scroll = QtWidgets.QScrollArea(preview_section)
-        prev_scroll.setWidgetResizable(True)
-        prev_scroll.setWidget(self.preview_display)
-        prev_scroll.setObjectName("previewImageScrollArea")
-        prev_scroll.setFocusPolicy(QtCore.Qt.StrongFocus)
-        preview_layout.addWidget(prev_scroll, 1)
+        preview_layout.addWidget(self.preview_display, 1)
 
         self.image_splitter.addWidget(original_section)
         self.image_splitter.addWidget(preview_section)
@@ -880,6 +838,40 @@ class MainWindow(QtWidgets.QMainWindow):
         if isinstance(dispatcher, UpdateDispatcher):
             self.set_update_dispatcher(dispatcher)
 
+    def _build_preview_record(
+        self, image: Optional[np.ndarray]
+    ) -> Optional[TiledImageRecord]:
+        if image is None:
+            return None
+        array = np.ascontiguousarray(image)
+        if array.ndim < 2:
+            return None
+        levels: List[Tuple[float, np.ndarray]] = [(1.0, array)]
+        current = array
+        scale = 1.0
+        while min(current.shape[0], current.shape[1]) > 512:
+            new_width = max(1, current.shape[1] // 2)
+            new_height = max(1, current.shape[0] // 2)
+            resized = cv2.resize(
+                current,
+                (int(new_width), int(new_height)),
+                interpolation=cv2.INTER_AREA,
+            )
+            scale /= 2.0
+            current = np.ascontiguousarray(resized)
+            levels.append((scale, current))
+        tiled_levels = [
+            TiledImageLevel(scale=level_scale, fetch=lambda data=data: data)
+            for level_scale, data in levels
+        ]
+        return TiledImageRecord(tiled_levels)
+
+    def _set_original_display_image(self, image: Optional[np.ndarray]) -> None:
+        self.original_display.set_image(self._build_preview_record(image))
+
+    def _set_preview_display_image(self, image: Optional[np.ndarray]) -> None:
+        self.preview_display.set_image(self._build_preview_record(image))
+
     def set_update_dispatcher(self, dispatcher: UpdateDispatcher) -> None:
         if self._update_dispatcher is dispatcher:
             return
@@ -953,7 +945,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if image_to_use is not None:
             self.committed_image = np.array(image_to_use, copy=True)
             self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            self._set_preview_display_image(self.current_preview)
             self._preview_signature = snapshot.cache_signature
             if metadata:
                 self._last_pipeline_metadata = metadata
@@ -1002,7 +994,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if image_to_use is not None:
             self.committed_image = np.array(image_to_use, copy=True)
             self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            self._set_preview_display_image(self.current_preview)
             self._preview_signature = snapshot.cache_signature
             if metadata:
                 self._last_pipeline_metadata = metadata
@@ -1831,12 +1823,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_preview_from_result(self, result: PipelineCacheResult) -> None:
         self._preview_signature = result.final_signature
         self.current_preview = result.image.copy()
-        self.preview_display.set_image(self.current_preview)
+        self._set_preview_display_image(self.current_preview)
 
     def _update_committed_from_result(self, result: PipelineCacheResult) -> None:
         self.committed_image = result.image.copy()
         self.current_preview = self.committed_image.copy()
-        self.preview_display.set_image(self.current_preview)
+        self._set_preview_display_image(self.current_preview)
         self._committed_signature = result.final_signature
         self._preview_signature = result.final_signature
         self._last_pipeline_metadata = result.metadata
@@ -2118,8 +2110,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._source_id, self._source_id
             )
             self.pipeline = build_preprocessing_pipeline(self.app_core, self.pipeline_manager)
-            self.original_display.set_image(self.original_image)
-            self.preview_display.set_image(self.base_image)
+            self._set_original_display_image(self.original_image)
+            self._set_preview_display_image(self.base_image)
             self.update_preview()
             self.pipeline_manager.clear_history()
             self.update_undo_redo_actions()
@@ -2193,7 +2185,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if cached is not None:
             self._preview_signature = final_signature
             self.current_preview = cached.copy()
-            self.preview_display.set_image(self.current_preview)
+            self._set_preview_display_image(self.current_preview)
             return
         self._apply_pipeline_async(
             description="Updating preview",
@@ -2232,7 +2224,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if cached is not None:
             self._preview_signature = final_signature
             self.current_preview = cached.copy()
-            self.preview_display.set_image(self.current_preview)
+            self._set_preview_display_image(self.current_preview)
             return
         self._apply_pipeline_async(
             pipeline=temp_manager,
@@ -2269,7 +2261,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _cancel() -> None:
             if backup is not None:
-                self.preview_display.set_image(backup)
+                self._set_preview_display_image(backup)
             elif self.base_image is not None:
                 self.update_preview()
 
@@ -2307,7 +2299,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _cancel() -> None:
             if backup is not None:
-                self.preview_display.set_image(backup)
+                self._set_preview_display_image(backup)
             elif self.base_image is not None:
                 self.update_preview()
 
@@ -2350,7 +2342,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _cancel() -> None:
             if backup is not None:
-                self.preview_display.set_image(backup)
+                self._set_preview_display_image(backup)
             elif self.base_image is not None:
                 self.update_preview()
 
@@ -2391,7 +2383,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _cancel() -> None:
             if backup is not None:
-                self.preview_display.set_image(backup)
+                self._set_preview_display_image(backup)
             elif self.base_image is not None:
                 self.update_preview()
 
@@ -2431,7 +2423,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _cancel() -> None:
             if backup is not None:
-                self.preview_display.set_image(backup)
+                self._set_preview_display_image(backup)
             elif self.base_image is not None:
                 self.update_preview()
 
@@ -2471,7 +2463,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _cancel() -> None:
             if backup is not None:
-                self.preview_display.set_image(backup)
+                self._set_preview_display_image(backup)
             elif self.base_image is not None:
                 self.update_preview()
 
@@ -2534,7 +2526,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _cancel() -> None:
             if backup is not None:
-                self.preview_display.set_image(backup)
+                self._set_preview_display_image(backup)
             elif self.base_image is not None:
                 self.update_preview()
 
@@ -2560,7 +2552,6 @@ __all__ = [
     "BrightnessContrastDialog",
     "CropDialog",
     "GammaDialog",
-    "ImageDisplayWidget",
     "MainWindow",
     "NoiseReductionDialog",
     "NormalizeDialog",
