@@ -72,3 +72,18 @@ packaging language packs with Qt Linguist tools.
 - [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md) – guidance for authoring
   new processing modules, integrating with `AppCore`, and meeting logging and UI
   accessibility conventions.
+
+## Development tooling
+
+This repository standardises formatting, linting, and type checking so
+contributors have a consistent baseline:
+
+- Install the toolchain with `pip install -r requirements-dev.txt`.
+- Format and lint the project via `scripts/format.sh`, which runs Black,
+  Flake8, and mypy with the configuration defined in `pyproject.toml` and
+  `setup.cfg`.
+
+`pyproject.toml` configures Black (88 character lines, targeting Python 3.10)
+and applies strict mypy defaults suitable for the codebase. Flake8 mirrors the
+same line length and enables `flake8-bugbear` for additional checks to keep the
+codebase healthy.
