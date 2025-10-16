@@ -1187,6 +1187,18 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         view_menu.addAction(self.enable_diagnostics_logging_action)
 
+        self.enable_telemetry_action = QtWidgets.QAction(
+            "Share Anonymous Telemetry", self
+        )
+        self.enable_telemetry_action.setCheckable(True)
+        self.enable_telemetry_action.setChecked(self.app_core.telemetry_opt_in)
+        self.enable_telemetry_action.setEnabled(self.app_core.diagnostics_enabled)
+        self.enable_telemetry_action.setStatusTip(
+            "Allow the application to send anonymized usage diagnostics"
+        )
+        self.enable_telemetry_action.toggled.connect(self._set_telemetry_opt_in)
+        view_menu.addAction(self.enable_telemetry_action)
+
         ensure_menu(("Modules",))
 
         for module in self.app_core.get_modules(ModuleStage.PREPROCESSING):
@@ -1483,6 +1495,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_diagnostics_logging(self, enabled: bool) -> None:
         self.app_core.set_diagnostics_enabled(enabled)
+        if hasattr(self, "enable_telemetry_action"):
+            self.enable_telemetry_action.setEnabled(enabled)
+            self.enable_telemetry_action.blockSignals(True)
+            self.enable_telemetry_action.setChecked(self.app_core.telemetry_opt_in)
+            self.enable_telemetry_action.blockSignals(False)
         message = (
             "Diagnostics logging enabled."
             if enabled
@@ -1491,6 +1508,14 @@ class MainWindow(QtWidgets.QMainWindow):
         LOGGER.info(message)
         self.statusBar().showMessage(message, 3000)
         self.diagnosticsLoggingToggled.emit(enabled)
+
+    def _set_telemetry_opt_in(self, opt_in: bool) -> None:
+        self.app_core.configure_telemetry(opt_in)
+        if hasattr(self, "enable_telemetry_action"):
+            self.enable_telemetry_action.blockSignals(True)
+            self.enable_telemetry_action.setChecked(self.app_core.telemetry_opt_in)
+            self.enable_telemetry_action.setEnabled(self.app_core.diagnostics_enabled)
+            self.enable_telemetry_action.blockSignals(False)
 
     def _on_module_action_triggered(self, module: ModuleBase) -> None:
         self._activate_module(module)
