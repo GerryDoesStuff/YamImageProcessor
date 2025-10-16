@@ -36,6 +36,8 @@ class AppConfiguration:
     application: str = "ImageProcessor"
     log_level: int = logging.INFO
     diagnostics_enabled: bool = False
+    telemetry_opt_in: bool = False
+    telemetry_settings_key: str = "telemetry/enabled"
     log_directory: Path = Path("logs")
     log_filename: str = "application.log"
     plugin_packages: Sequence[str] = field(default_factory=lambda: ["modules"])
@@ -81,6 +83,9 @@ class AppCore:
         self.session_pipeline_cache_dir: Optional[Path] = None
         self.session_recovery_dir: Optional[Path] = None
         self.autosave_workspace: Optional[Path] = None
+        self.telemetry_setting_key: str = self.config.telemetry_settings_key
+        self._telemetry_opt_in: bool = self._coerce_bool(self.config.telemetry_opt_in)
+        self.telemetry_enabled: bool = False
 
     # ------------------------------------------------------------------
     # Lifecycle management
@@ -259,6 +264,7 @@ class AppCore:
             "autosave/interval_seconds": self.config.autosave_interval_seconds,
             "autosave/backup_retention": self.config.autosave_backup_retention,
             "autosave/enabled": self.config.autosave_enabled_default,
+            self.telemetry_setting_key: self._telemetry_opt_in,
         }
         if self.config.autosave_directory is not None:
             defaults["autosave/workspace"] = str(self.config.autosave_directory)
@@ -278,6 +284,12 @@ class AppCore:
         self.set_diagnostics_enabled(
             self._coerce_bool(stored_diagnostics), persist=False
         )
+        stored_opt_in = self.settings_manager.get(
+            self.telemetry_setting_key, self._telemetry_opt_in
+        )
+        requested_opt_in = self._coerce_bool(stored_opt_in)
+        self._telemetry_opt_in = requested_opt_in
+        self.telemetry_enabled = self._resolve_telemetry_opt_in(requested_opt_in)
         self._io_manager = IOManager(self.settings_manager)
         self._refresh_allowed_roots()
         self._init_autosave()
@@ -473,6 +485,64 @@ class AppCore:
         self.logger.setLevel(logging.DEBUG if enabled else self.config.log_level)
         if persist and self.settings_manager is not None:
             self.settings_manager.set("diagnostics/enabled", enabled)
+        self.configure_telemetry(self._telemetry_opt_in, persist=False)
+
+    def configure_telemetry(self, opt_in: bool, *, persist: bool = True) -> None:
+        requested = self._coerce_bool(opt_in)
+        previous_state = self.telemetry_enabled
+        self._telemetry_opt_in = requested
+        telemetry_state = self._resolve_telemetry_opt_in(requested)
+        diagnostics_active = self.config.diagnostics_enabled
+        self.telemetry_enabled = telemetry_state
+
+        if telemetry_state and not previous_state:
+            self.logger.info(
+                "Telemetry enabled",
+                extra={"component": "AppCore", "telemetry_enabled": True},
+            )
+        elif previous_state and not telemetry_state:
+            self.logger.info(
+                "Telemetry disabled",
+                extra={
+                    "component": "AppCore",
+                    "telemetry_enabled": False,
+                    "diagnostics_enabled": diagnostics_active,
+                    "opt_in": requested,
+                },
+            )
+        elif requested and not diagnostics_active:
+            self.logger.debug(
+                "Telemetry opt-in ignored (diagnostics disabled)",
+                extra={"component": "AppCore"},
+            )
+
+        if persist and self.settings_manager is not None:
+            self.settings_manager.set(self.telemetry_setting_key, requested)
+
+    @property
+    def telemetry_opt_in(self) -> bool:
+        return self._telemetry_opt_in
+
+    def _resolve_telemetry_opt_in(self, requested: Optional[bool] = None) -> bool:
+        if requested is None:
+            requested_value = self._telemetry_opt_in
+            if self.settings_manager is not None:
+                stored = self.settings_manager.get(
+                    self.telemetry_setting_key, requested_value
+                )
+                requested_value = self._coerce_bool(stored)
+        else:
+            requested_value = self._coerce_bool(requested)
+
+        self._telemetry_opt_in = requested_value
+
+        if requested_value and not self.config.diagnostics_enabled:
+            self.logger.debug(
+                "Telemetry opt-in suppressed (diagnostics disabled)",
+                extra={"component": "AppCore"},
+            )
+            return False
+        return requested_value and self.config.diagnostics_enabled
 
     def set_log_level(self, level: int) -> None:
         self.config.log_level = level

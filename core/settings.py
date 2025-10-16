@@ -19,6 +19,7 @@ except Exception:  # pragma: no cover
 DEFAULT_SETTINGS: Dict[str, Any] = {
     # Diagnostics -----------------------------------------------------------------
     "diagnostics/enabled": False,
+    "telemetry/enabled": False,
     # Autosave --------------------------------------------------------------------
     "autosave/enabled": True,
     "autosave/interval_seconds": 120.0,
