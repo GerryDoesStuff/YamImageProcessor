@@ -10,7 +10,7 @@ the top-level `translations/` directory before windows are created.
 
 * Qt Linguist tools (`pylupdate5` and `lrelease`).  They ship with PyQt5 and Qt
   SDK installations.  On Debian/Ubuntu systems you can install them with
-  `apt-get install pyqt5-dev-tools`.
+  `apt-get install qttools5-dev-tools` (or the older `pyqt5-dev-tools`).
 
 ## Generating or Updating Catalogues
 
@@ -28,6 +28,9 @@ the top-level `translations/` directory before windows are created.
    * `translations/yam_processor_<locale>.qm` – compiled language pack loaded
      by the desktop entry points.
 
+   The build script mirrors the compiled `.qm` files into
+   `yam_processor/i18n/` so they are bundled with wheel/installer builds.
+
    Set the `PYLUPDATE5` or `LRELEASE` environment variables to override the
    executables if they are not on your `PATH`.
 
@@ -37,7 +40,15 @@ the top-level `translations/` directory before windows are created.
 ## Packaging
 
 Ship the `.qm` files inside the repository-level `translations/` directory with
-any binary distribution (wheels, PyInstaller bundle, etc.).
+any binary distribution (wheels, PyInstaller bundle, etc.).  The packaging
+configuration already includes the mirrored copies under `yam_processor/i18n/`,
+which is also part of the default search path used by
+`core.i18n.bootstrap_translations()`.
+
+## Available Locales
+
+The repository currently ships a placeholder Spanish (`es`) catalogue, ready for
+translation via Qt Linguist.
 
 ## Selecting a Language at Runtime
 
