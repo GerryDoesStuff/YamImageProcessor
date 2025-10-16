@@ -88,6 +88,23 @@ class PipelineCacheResult:
     metadata: Dict[str, Any]
 
 
+@dataclass(frozen=True)
+class PipelineCacheTileUpdate:
+    """Incremental update emitted while streaming tiled pipeline results."""
+
+    source_id: str
+    final_signature: str
+    step_signature: str
+    step_index: int
+    total_steps: int
+    box: TileBox
+    tile: NDArray
+    shape: Tuple[int, ...]
+    dtype: np.dtype
+    tile_size: Optional[TileSize]
+    from_cache: bool = False
+
+
 CacheValue = Union[NDArray, "TileCacheEntry"]
 
 
@@ -269,6 +286,7 @@ class PipelineCache:
         *,
         cancel_event: Optional[threading.Event] = None,
         progress: Optional[Callable[[int], None]] = None,
+        incremental: Optional[Callable[[PipelineCacheTileUpdate], None]] = None,
     ) -> PipelineCacheResult:
         """Evaluate ``steps`` against ``image`` storing intermediate results."""
 
@@ -283,6 +301,7 @@ class PipelineCache:
                 records,
                 cancel_event=cancel_event,
                 progress=progress,
+                incremental=incremental,
             )
 
         return self._compute_dense(
@@ -293,6 +312,7 @@ class PipelineCache:
             records,
             cancel_event=cancel_event,
             progress=progress,
+            incremental=incremental,
         )
 
     def _compute_dense(
@@ -305,6 +325,7 @@ class PipelineCache:
         *,
         cancel_event: Optional[threading.Event],
         progress: Optional[Callable[[int], None]],
+        incremental: Optional[Callable[[PipelineCacheTileUpdate], None]],
     ) -> PipelineCacheResult:
         with self._lock:
             cache = self._cache.setdefault(source_id, {})
@@ -366,6 +387,7 @@ class PipelineCache:
         *,
         cancel_event: Optional[threading.Event],
         progress: Optional[Callable[[int], None]],
+        incremental: Optional[Callable[[PipelineCacheTileUpdate], None]],
     ) -> PipelineCacheResult:
         with self._lock:
             cache = self._cache.setdefault(source_id, {})
@@ -375,6 +397,31 @@ class PipelineCache:
         dtype_hint = image.dtype or np.float32
         tile_size = image.tile_size
         current_entry: Optional[TileCacheEntry] = None
+
+        def _emit_tile_update(
+            *,
+            box: TileBox,
+            tile: NDArray,
+            step_signature: str,
+            step_index: int,
+            from_cache: bool = False,
+        ) -> None:
+            if incremental is None:
+                return
+            payload = PipelineCacheTileUpdate(
+                source_id=source_id,
+                final_signature=final_signature,
+                step_signature=step_signature,
+                step_index=step_index,
+                total_steps=total_steps,
+                box=tuple(int(value) for value in box),
+                tile=np.array(tile, copy=True),
+                shape=tuple(int(dim) for dim in shape),
+                dtype=np.dtype(tile.dtype),
+                tile_size=tile_size,
+                from_cache=from_cache,
+            )
+            incremental(payload)
 
         for index, (step, record) in enumerate(zip(steps, records)):
             if cancel_event is not None and cancel_event.is_set():
@@ -386,6 +433,19 @@ class PipelineCache:
                     current_entry = TileCacheEntry.from_array(cached)
                 else:
                     current_entry = cached
+                if (
+                    incremental is not None
+                    and current_entry is not None
+                    and index + 1 == total_steps
+                ):
+                    for box, tile in current_entry.iter_tiles():
+                        _emit_tile_update(
+                            box=box,
+                            tile=tile,
+                            step_signature=record.signature,
+                            step_index=index + 1,
+                            from_cache=True,
+                        )
             else:
                 iterator: Iterator[Tuple[TileBox, NDArray]]
                 if current_entry is None:
@@ -404,6 +464,13 @@ class PipelineCache:
                     if tile_dtype is None:
                         tile_dtype = tile_array.dtype
                     tiles.append((box, np.array(tile_array, copy=True)))
+                    if index + 1 == total_steps:
+                        _emit_tile_update(
+                            box=box,
+                            tile=tile_array,
+                            step_signature=record.signature,
+                            step_index=index + 1,
+                        )
 
                 if not tiles:
                     tile_dtype = np.dtype(dtype_hint)
@@ -432,6 +499,12 @@ class PipelineCache:
                 tiles.append((box, array_tile))
                 if tile_dtype is None:
                     tile_dtype = array_tile.dtype
+                _emit_tile_update(
+                    box=box,
+                    tile=array_tile,
+                    step_signature=final_signature,
+                    step_index=total_steps,
+                )
             if tile_dtype is None:
                 tile_dtype = np.dtype(dtype_hint)
             current_entry = TileCacheEntry.from_tiles(
@@ -720,5 +793,11 @@ class PipelineCache:
                     path.unlink()
 
 
-__all__ = ["PipelineCache", "PipelineCacheResult", "StepRecord", "TileCacheEntry"]
+__all__ = [
+    "PipelineCache",
+    "PipelineCacheResult",
+    "PipelineCacheTileUpdate",
+    "StepRecord",
+    "TileCacheEntry",
+]
 
