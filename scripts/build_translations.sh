@@ -10,8 +10,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_DIR="$ROOT_DIR/yam_processor"
 TS_DIR="$ROOT_DIR/translations"
 I18N_DIR="$ROOT_DIR/translations"
+PACKAGE_I18N_DIR="$ROOT_DIR/yam_processor/i18n"
 
-mkdir -p "$TS_DIR" "$I18N_DIR"
+mkdir -p "$TS_DIR" "$I18N_DIR" "$PACKAGE_I18N_DIR"
 
 readarray -t SOURCES < <(find "$SOURCE_DIR" -type f -name '*.py' ! -path '*/__pycache__/*' ! -name 'resources_rc.py' -print)
 
@@ -30,8 +31,10 @@ for locale in "$@"; do
 
     "$PARSER_COMMAND" "${SOURCES[@]}" -ts "$ts_file"
     "$LRELEASE_COMMAND" "$ts_file" -qm "$qm_file"
+    cp "$qm_file" "$PACKAGE_I18N_DIR/"
 
     printf 'Generated %s\n' "$qm_file"
     printf 'Updated source catalogue %s\n' "$ts_file"
+    printf 'Copied %s into package directory %s\n' "$(basename "$qm_file")" "$PACKAGE_I18N_DIR"
 
 done

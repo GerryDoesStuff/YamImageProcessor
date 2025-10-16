@@ -1,6 +1,7 @@
 """Helpers for loading Qt translation catalogues at application start."""
 from __future__ import annotations
 
+import importlib.util
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Sequence
@@ -43,11 +44,33 @@ def _candidate_paths(
         yield directory / f"{prefix}_{language}.qm"
 
 
+def default_translation_directories() -> List[Path]:
+    """Return directories searched for translation catalogues by default."""
+
+    candidates: list[Path] = []
+    project_root = Path(__file__).resolve().parent.parent
+    candidates.append(project_root / "translations")
+
+    spec = importlib.util.find_spec("yam_processor")
+    if spec and spec.origin:
+        package_root = Path(spec.origin).resolve().parent
+        candidates.append(package_root / "i18n")
+
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.expanduser()
+        if resolved not in seen:
+            ordered.append(resolved)
+            seen.add(resolved)
+    return ordered
+
+
 @dataclass
 class TranslationConfig:
     """Configuration describing how to locate translation catalogues."""
 
-    directories: Sequence[Path | str] = field(default_factory=list)
+    directories: Sequence[Path | str] = field(default_factory=default_translation_directories)
     locales: Sequence[str] = field(default_factory=tuple)
     file_prefix: str = "yam_processor"
 
@@ -71,7 +94,13 @@ class TranslationLoader(QtCore.QObject):
         self.remove()
         loaded: list[Path] = []
         locales = _normalise_locale_codes(self._config.locales)
-        directories = [Path(path) for path in self._config.directories]
+        directories: list[Path] = []
+        seen_dirs: set[Path] = set()
+        for path in self._config.directories:
+            resolved = Path(path).expanduser()
+            if resolved not in seen_dirs:
+                directories.append(resolved)
+                seen_dirs.add(resolved)
 
         for directory in directories:
             if not directory.exists():
@@ -107,6 +136,7 @@ def bootstrap_translations(
 
 
 __all__ = [
+    "default_translation_directories",
     "TranslationConfig",
     "TranslationLoader",
     "bootstrap_translations",

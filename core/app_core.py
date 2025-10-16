@@ -33,6 +33,7 @@ from .signing import (
     TrustStoreError,
     signature_path_for,
 )
+from .i18n import default_translation_directories
 
 from .logging import init_logging
 from processing.pipeline_cache import PipelineCache
@@ -62,7 +63,7 @@ class AppConfiguration:
     autosave_enabled_default: bool = True
     allowed_roots: Sequence[Path | str] = field(default_factory=lambda: [Path.cwd()])
     translation_directories: Sequence[Path | str] = field(
-        default_factory=lambda: [Path(__file__).resolve().parent.parent / "translations"]
+        default_factory=default_translation_directories
     )
     translation_locales: Sequence[str] = field(default_factory=tuple)
     translation_prefix: str = "yam_processor"
