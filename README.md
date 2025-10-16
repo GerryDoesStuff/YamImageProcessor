@@ -1,5 +1,7 @@
 # YamImageProcessor
 
+[![CI](https://github.com/YamLabs/YamImageProcessor/actions/workflows/ci.yml/badge.svg)](https://github.com/YamLabs/YamImageProcessor/actions/workflows/ci.yml)
+
 The YamImageProcessor project provides a modular foundation for building a microscopic image processing desktop application. The
 system is split into clear layers covering core bootstrapping, processing workflows, UI presentation, and plugin discovery in l
 ine with the architectural design documents.
@@ -87,3 +89,20 @@ contributors have a consistent baseline:
 and applies strict mypy defaults suitable for the codebase. Flake8 mirrors the
 same line length and enables `flake8-bugbear` for additional checks to keep the
 codebase healthy.
+
+## Continuous integration
+
+Automated checks run through [GitHub Actions](.github/workflows/ci.yml) on every
+push and pull request. The workflow provisions Python 3.10, restores a cached
+`.venv`, installs runtime dependencies from `requirements.txt` alongside the
+tooling in `requirements-dev.txt`, and runs the same quality gates that
+contributors use locally:
+
+- `black --check` ensures formatting stays consistent.
+- `flake8` enforces style and bug-finding lint rules.
+- `mypy` performs static type analysis.
+- `pytest` (with `pytest-qt`) exercises the test suite, including the Qt UI
+  components in headless mode.
+
+All jobs must pass before changes are merged. If any command fails locally,
+resolve the issue before pushing to avoid blocking CI.
