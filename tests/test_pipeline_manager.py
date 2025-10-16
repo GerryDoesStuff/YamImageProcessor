@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import types
 import importlib.util
+from typing import Tuple
 
 import pytest
 
@@ -69,6 +70,37 @@ def _tiled_passthrough(image, *, offset: float = 0.0):
     if offset:
         return image.to_array() + offset
     return image
+
+
+class _StreamingRecord:
+    def __init__(self, array: np.ndarray, tile_size: Tuple[int, int]) -> None:
+        self._array = array
+        self.tile_size = tile_size
+        self.shape = array.shape
+        self.dtype = array.dtype
+        self.size = (array.shape[1], array.shape[0])
+
+    def close(self) -> None:  # pragma: no cover - compatibility stub
+        pass
+
+    def iter_tiles(self, tile_size: Tuple[int, int] | None = None):
+        size = tile_size if tile_size is not None else self.tile_size
+        if size is None:
+            yield (0, 0, self.size[0], self.size[1]), self._array
+            return
+        width, height = size
+        for top in range(0, self._array.shape[0], height):
+            bottom = min(top + height, self._array.shape[0])
+            for left in range(0, self._array.shape[1], width):
+                right = min(left + width, self._array.shape[1])
+                yield (left, top, right, bottom), self._array[top:bottom, left:right]
+
+    def read_region(self, box):
+        left, top, right, bottom = box
+        return self._array[top:bottom, left:right]
+
+    def to_array(self):  # pragma: no cover - should not be called
+        raise AssertionError("Streaming pipeline should not materialise the full array")
 
 
 @pytest.fixture()
@@ -181,3 +213,20 @@ def test_pipeline_preserves_tiled_records_for_supported_steps(tiled_pipeline_ima
 
     assert result is record
     np.testing.assert_allclose(record.to_array(), array)
+
+
+def test_pipeline_streams_tiles_when_steps_require_dense_input() -> None:
+    array = np.arange(16, dtype=np.float32).reshape(4, 4)
+    record = _StreamingRecord(array, tile_size=(2, 2))
+    tiled = TiledPipelineImage(record, tile_size=(2, 2))
+    manager = PipelineManager(
+        [
+            PipelineStep("add", _add_value, params={"value": 1.0}),
+            PipelineStep("multiply", _multiply_value, params={"factor": 2.0}),
+        ]
+    )
+
+    result = manager.apply(tiled)
+
+    assert isinstance(result, np.ndarray)
+    np.testing.assert_allclose(result, (array + 1.0) * 2.0)
