@@ -198,6 +198,21 @@ class PreviewWidget(QtWidgets.QWidget):
         self._current_level_index = level_index
         self._start_next_level(request_id)
 
+    def update_array(self, image: np.ndarray) -> None:
+        """Update the displayed pixmap using a precomputed ``numpy`` array."""
+
+        self._request_id += 1
+        self._pending_levels = []
+        self._current_level_index = None
+        qimage, buffer = self._to_qimage(image)
+        self._image_buffer = buffer
+        pixmap = QtGui.QPixmap.fromImage(qimage)
+        if self._current_pixmap is None:
+            self._current_pixmap = self._scene.addPixmap(pixmap)
+            self._fit_view()
+        else:
+            self._current_pixmap.setPixmap(pixmap)
+
     @QtCore.pyqtSlot(int, Exception, str, int)
     def _handle_level_failed(
         self, level_index: int, error: Exception, traceback_text: str, request_id: int

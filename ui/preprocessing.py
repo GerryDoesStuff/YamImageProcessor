@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import traceback
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -19,7 +20,7 @@ from core.path_sanitizer import PathValidationError, sanitize_user_path
 from core.preprocessing import Config, Loader
 from core.thread_controller import OperationCancelled, ThreadController
 from plugins.module_base import ModuleBase, ModuleStage
-from processing.pipeline_cache import PipelineCacheResult
+from processing.pipeline_cache import PipelineCacheResult, PipelineCacheTileUpdate
 from processing.pipeline_manager import PipelineManager
 from processing.preprocessing_pipeline import (
     PreprocessingPipeline,
@@ -41,6 +42,27 @@ from yam_processor.ui.diagnostics_panel import DiagnosticsPanel
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class _ProgressivePreviewState:
+    """Track incremental pipeline output for the progressive preview."""
+
+    signature: str
+    shape: Tuple[int, ...]
+    buffer: np.ndarray
+
+    def apply_update(self, update: PipelineCacheTileUpdate) -> None:
+        left, top, right, bottom = update.box
+        tile = np.asarray(update.tile)
+        if tile.dtype != self.buffer.dtype:
+            tile = tile.astype(self.buffer.dtype, copy=False)
+        if self.buffer.ndim == 2:
+            self.buffer[top:bottom, left:right] = tile
+        else:
+            self.buffer[top:bottom, left:right, ...] = tile
+
+
 class UpdateNotificationDialog(QtWidgets.QDialog):
     """Simple dialog presenting update notes and helpful links."""
 
@@ -597,6 +619,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preview_signature: Optional[str] = None
         self._committed_signature: Optional[str] = None
         self._last_pipeline_metadata: Dict[str, Any] = {}
+        self._pending_preview_signature: Optional[str] = None
+        self._progressive_preview_state: Optional[_ProgressivePreviewState] = None
+        self._progressive_generation_counter = 0
+        self._active_progressive_generation: Optional[int] = None
         if self.app_core.thread_controller is None:
             self.app_core.thread_controller = ThreadController(parent=self)
         self.thread_controller: ThreadController = self.app_core.thread_controller
@@ -1702,6 +1728,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "%s was canceled.",
             self._current_task_description or "Processing",
         )
+        self._active_progressive_generation = None
+        self._progressive_preview_state = None
+        self._pending_preview_signature = None
         self._active_task_id = None
 
     @QtCore.pyqtSlot(Exception, str)
@@ -1735,6 +1764,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_task_description or "Processing",
             error,
         )
+        self._active_progressive_generation = None
+        self._progressive_preview_state = None
+        self._pending_preview_signature = None
         self._active_task_id = None
 
     def _ensure_source_registered(self, image: np.ndarray) -> Optional[str]:
@@ -1766,22 +1798,46 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         steps = tuple(step.clone() for step in pipeline.steps)
+        final_signature, _ = self.pipeline_cache.predict(source_id, steps)
+
+        self._pending_preview_signature = final_signature
+        self._progressive_preview_state = None
+        self._progressive_generation_counter += 1
+        generation = self._progressive_generation_counter
+        self._active_progressive_generation = generation
 
         def _handle_finished(result: PipelineCacheResult) -> None:
+            if self._active_progressive_generation != generation:
+                return
+            self._active_progressive_generation = None
+            self._progressive_preview_state = None
+            self._pending_preview_signature = None
             if on_finished is not None:
                 on_finished(result)
 
         def _handle_canceled() -> None:
+            if self._active_progressive_generation == generation:
+                self._active_progressive_generation = None
+                self._progressive_preview_state = None
+                self._pending_preview_signature = None
             if on_canceled is not None:
                 on_canceled()
 
-        def _task(cancel_event: threading.Event, progress: Callable[[int], None]):
+        def _handle_incremental(update: object) -> None:
+            self._handle_pipeline_incremental_update(update, generation)
+
+        def _task(
+            cancel_event: threading.Event,
+            progress: Callable[[int], None],
+            incremental: Optional[Callable[[object], None]] = None,
+        ):
             return self.pipeline_cache.compute(
                 source_id=source_id,
                 image=image,
                 steps=steps,
                 cancel_event=cancel_event,
                 progress=progress,
+                incremental=incremental,
             )
 
         self.thread_controller.run_task(
@@ -1789,7 +1845,41 @@ class MainWindow(QtWidgets.QMainWindow):
             description=description,
             on_finished=_handle_finished,
             on_canceled=_handle_canceled,
+            on_intermediate=_handle_incremental,
         )
+
+    def _handle_pipeline_incremental_update(
+        self, update: object, generation: int
+    ) -> None:
+        if self._active_progressive_generation != generation:
+            return
+        if not isinstance(update, PipelineCacheTileUpdate):
+            return
+        if (
+            self._pending_preview_signature is not None
+            and update.final_signature != self._pending_preview_signature
+        ):
+            return
+        if update.step_index != update.total_steps:
+            return
+
+        state = self._progressive_preview_state
+        shape = tuple(int(dim) for dim in update.shape)
+        if (
+            state is None
+            or state.signature != update.final_signature
+            or state.shape != shape
+        ):
+            buffer = np.zeros(shape, dtype=update.dtype)
+            state = _ProgressivePreviewState(
+                signature=update.final_signature,
+                shape=shape,
+                buffer=buffer,
+            )
+            self._progressive_preview_state = state
+
+        state.apply_update(update)
+        self.preview_display.update_array(state.buffer)
 
     def _present_parameter_dialog(
         self,
