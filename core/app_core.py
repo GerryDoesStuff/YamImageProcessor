@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import logging
 import pkgutil
@@ -24,6 +25,14 @@ from .path_sanitizer import configure_allowed_roots
 from .persistence import AutosaveManager
 from .recovery import RecoveryManager
 from .settings import SettingsManager
+from .signing import (
+    InvalidSignatureError,
+    MissingSignatureError,
+    ModuleSignatureVerifier,
+    SignatureVerificationError,
+    TrustStoreError,
+    signature_path_for,
+)
 
 from .logging import init_logging
 from processing.pipeline_cache import PipelineCache
@@ -44,6 +53,8 @@ class AppConfiguration:
     log_filename: str = "application.log"
     plugin_packages: Sequence[str] = field(default_factory=lambda: ["modules"])
     module_paths: Sequence[Path | str] = field(default_factory=list)
+    plugin_trust_store_paths: Sequence[Path | str] = field(default_factory=list)
+    plugin_signature_extension: str = ".sig"
     max_workers: Optional[int] = None
     autosave_directory: Optional[Path] = None
     autosave_interval_seconds: float = 120.0
@@ -190,6 +201,21 @@ class AppCore:
         self.update_dispatcher = UpdateDispatcher(
             self._handle_update_acknowledged, logger=self.logger
         )
+        self._signature_extension = self.config.plugin_signature_extension
+        self._signature_verifier: Optional[ModuleSignatureVerifier] = None
+        if self.config.plugin_trust_store_paths:
+            try:
+                self._signature_verifier = ModuleSignatureVerifier(
+                    self.config.plugin_trust_store_paths
+                )
+            except TrustStoreError as exc:
+                self.logger.warning(
+                    "Failed to initialise plugin signature verifier",
+                    extra={
+                        "component": "AppCore",
+                        "error": str(exc),
+                    },
+                )
 
     # ------------------------------------------------------------------
     # Lifecycle management
@@ -461,9 +487,123 @@ class AppCore:
             },
         )
 
+    def _read_module_bytes(self, spec: Any, module_path: Path) -> Optional[bytes]:
+        loader = getattr(spec, "loader", None)
+        origin = getattr(spec, "origin", None)
+        if loader and origin and hasattr(loader, "get_data"):
+            try:
+                return loader.get_data(origin)  # type: ignore[call-arg]
+            except OSError:
+                pass
+
+        try:
+            return module_path.read_bytes()
+        except OSError:
+            return None
+
+    def _should_load_module(self, module_name: str) -> bool:
+        if self._signature_verifier is None:
+            return True
+
+        try:
+            spec = importlib.util.find_spec(module_name)
+        except (ImportError, AttributeError, ModuleNotFoundError) as exc:
+            self.logger.warning(
+                "Unable to resolve module for signature verification",
+                extra={
+                    "component": "AppCore",
+                    "plugin_module": module_name,
+                    "error": str(exc),
+                },
+            )
+            return False
+
+        if spec is None or getattr(spec, "origin", None) is None:
+            self.logger.warning(
+                "Module has no origin for signature verification",
+                extra={"component": "AppCore", "plugin_module": module_name},
+            )
+            return False
+
+        module_path = Path(spec.origin)
+        module_bytes = self._read_module_bytes(spec, module_path)
+        if module_bytes is None:
+            self.logger.warning(
+                "Failed to read module bytes for signature verification",
+                extra={
+                    "component": "AppCore",
+                    "plugin_module": module_name,
+                    "path": str(module_path),
+                },
+            )
+            return False
+
+        signature_path = signature_path_for(module_path, self._signature_extension)
+        try:
+            signature_bytes = signature_path.read_bytes()
+        except FileNotFoundError:
+            self.logger.warning(
+                "Missing signature for module",
+                extra={
+                    "component": "AppCore",
+                    "plugin_module": module_name,
+                    "signature_path": str(signature_path),
+                },
+            )
+            return False
+        except OSError as exc:
+            self.logger.warning(
+                "Unable to read module signature",
+                extra={
+                    "component": "AppCore",
+                    "plugin_module": module_name,
+                    "signature_path": str(signature_path),
+                    "error": str(exc),
+                },
+            )
+            return False
+
+        try:
+            self._signature_verifier.verify(module_bytes, signature_bytes)
+        except MissingSignatureError:
+            self.logger.warning(
+                "Empty signature provided for module",
+                extra={
+                    "component": "AppCore",
+                    "plugin_module": module_name,
+                    "signature_path": str(signature_path),
+                },
+            )
+            return False
+        except InvalidSignatureError:
+            self.logger.warning(
+                "Rejected module due to invalid signature",
+                extra={
+                    "component": "AppCore",
+                    "plugin_module": module_name,
+                    "signature_path": str(signature_path),
+                },
+            )
+            return False
+        except SignatureVerificationError as exc:
+            self.logger.warning(
+                "Failed to verify module signature",
+                extra={
+                    "component": "AppCore",
+                    "plugin_module": module_name,
+                    "signature_path": str(signature_path),
+                    "error": str(exc),
+                },
+            )
+            return False
+
+        return True
+
     def _discover_plugins(self) -> None:
         discovered: Dict[str, ModuleType] = {}
         for package_name in self.config.plugin_packages:
+            if not self._should_load_module(package_name):
+                continue
             try:
                 package = importlib.import_module(package_name)
             except ImportError as exc:  # pragma: no cover - discovery failure path
@@ -487,6 +627,8 @@ class AppCore:
             for _, name, _ in pkgutil.walk_packages(package_path, package.__name__ + "."):
                 if name in discovered:
                     continue
+                if not self._should_load_module(name):
+                    continue
                 try:
                     module = importlib.import_module(name)
                 except Exception as exc:  # pragma: no cover - plugin import guard
@@ -494,7 +636,7 @@ class AppCore:
                         "Failed to load plugin module",
                         extra={
                             "component": "AppCore",
-                            "module": name,
+                            "plugin_module": name,
                             "error": str(exc),
                         },
                     )
@@ -516,14 +658,14 @@ class AppCore:
             register(self)
             self.logger.debug(
                 "Plugin registered",
-                extra={"component": "AppCore", "module": module.__name__},
+                extra={"component": "AppCore", "plugin_module": module.__name__},
             )
         except Exception as exc:  # pragma: no cover - defensive logging
             self.logger.warning(
                 "Plugin registration failed",
                 extra={
                     "component": "AppCore",
-                    "module": module.__name__,
+                    "plugin_module": module.__name__,
                     "error": str(exc),
                 },
             )
