@@ -44,6 +44,7 @@ def test_pipeline_step_metadata_persistence() -> None:
         _add,
         params={"value": 2.0},
         execution=StepExecutionMetadata(supports_inplace=True, requires_gpu=True),
+        supports_tiled_input=True,
     )
 
     clone = step.clone()
@@ -52,10 +53,12 @@ def test_pipeline_step_metadata_persistence() -> None:
 
     payload = step.to_dict()
     assert payload["execution"] == {"supports_inplace": True, "requires_gpu": True}
+    assert payload["supports_tiled_input"] is True
 
     restored = PipelineStep.from_dict(payload, _add)
     assert restored.execution.requires_gpu is True
     assert restored.execution.supports_inplace is True
+    assert restored.supports_tiled_input is True
 
 
 def test_gpu_executor_used_for_marked_steps(sample_image: np.ndarray) -> None:

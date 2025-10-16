@@ -5,10 +5,14 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Protocol, Tuple, Union
 
 import numpy as np
 
+from .tiled_records import TiledPipelineImage
+
+
+PipelineImage = Union[np.ndarray, TiledPipelineImage]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -49,26 +53,31 @@ class PipelineStep:
     """A single step in an image processing pipeline."""
 
     name: str
-    function: Callable[..., np.ndarray]
+    function: Callable[..., PipelineImage]
     enabled: bool = True
     params: Dict[str, Any] = field(default_factory=dict)
     execution: StepExecutionMetadata = field(default_factory=StepExecutionMetadata)
+    supports_tiled_input: bool = False
 
-    def apply(self, image: np.ndarray) -> np.ndarray:
+    def apply(self, image: PipelineImage) -> PipelineImage:
         """Execute the processing step if enabled."""
 
         if not self.enabled:
             return image
-        result = self.function(image, **self.params)
+        operand = image
+        if isinstance(image, TiledPipelineImage) and not self.supports_tiled_input:
+            operand = image.to_array()
+
+        result = self.function(operand, **self.params)
         if result is None:
-            return image
+            result = operand
         if self.execution.supports_inplace:
-            if result is image:
-                return image
-            if isinstance(result, np.ndarray) and result.shape == image.shape:
-                if result.dtype == image.dtype:
-                    image[...] = result
-                    return image
+            if isinstance(operand, np.ndarray) and isinstance(result, np.ndarray):
+                if result is operand:
+                    return operand
+                if result.shape == operand.shape and result.dtype == operand.dtype:
+                    operand[...] = result
+                    return operand
         return result
 
     def clone(self) -> "PipelineStep":
@@ -83,6 +92,7 @@ class PipelineStep:
                 supports_inplace=self.execution.supports_inplace,
                 requires_gpu=self.execution.requires_gpu,
             ),
+            supports_tiled_input=self.supports_tiled_input,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -93,13 +103,15 @@ class PipelineStep:
         }
         if not self.execution.is_default():
             payload["execution"] = self.execution.to_dict()
+        if self.supports_tiled_input:
+            payload["supports_tiled_input"] = True
         return payload
 
     @classmethod
     def from_dict(
         cls,
         data: Dict[str, Any],
-        function: Callable[..., np.ndarray],
+        function: Callable[..., PipelineImage],
     ) -> "PipelineStep":
         return cls(
             name=data["name"],
@@ -107,6 +119,7 @@ class PipelineStep:
             enabled=bool(data.get("enabled", True)),
             params=dict(data.get("params", {})),
             execution=StepExecutionMetadata.from_dict(data.get("execution", {})),
+            supports_tiled_input=bool(data.get("supports_tiled_input", False)),
         )
 
 
@@ -306,21 +319,27 @@ class PipelineManager:
         else:
             step.params.update(params)
 
-    def apply(self, image: np.ndarray) -> np.ndarray:
-        result = image.copy()
+    def apply(self, image: PipelineImage) -> PipelineImage:
+        result: PipelineImage = image.copy() if isinstance(image, np.ndarray) else image
         for step in self.iter_enabled_steps():
             result = self._run_step(step, result)
         return result
 
-    def _run_step(self, step: PipelineStep, image: np.ndarray) -> np.ndarray:
+    def _run_step(self, step: PipelineStep, image: PipelineImage) -> PipelineImage:
         if step.execution.requires_gpu and self._gpu_executor is not None:
-            return self._gpu_executor.execute(step, image)
+            array_input = image if isinstance(image, np.ndarray) else image.to_array()
+            result = self._gpu_executor.execute(step, array_input)
+            if result is None:
+                return array_input
+            return result
 
         if step.execution.requires_gpu and self._gpu_executor is None:
             LOGGER.warning(
                 "Step '%s' requires GPU execution but no executor is configured; falling back to CPU.",
                 step.name,
             )
+            array_input = image if isinstance(image, np.ndarray) else image.to_array()
+            return step.apply(array_input)
         return step.apply(image)
 
     # ------------------------------------------------------------------
