@@ -39,3 +39,8 @@ ignore_missing_imports = true
 module = "tests.*"
 disable_error_code = ["attr-defined"]
 
+[tool.pytest.ini_options]
+markers = [
+    "performance: marks tests as performance-sensitive and skipped by default",
+]
+
