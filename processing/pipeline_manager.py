@@ -10,9 +10,15 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Prot
 import numpy as np
 
 from .tiled_records import TiledPipelineImage
+from core.tiled_image import TileBox
+
+try:  # pragma: no cover - defensive fallback when numpy stubs lack ndarray
+    NDArray = np.ndarray
+except AttributeError:  # pragma: no cover - executed in minimal test environments
+    NDArray = type(None)
 
 
-PipelineImage = Union[np.ndarray, TiledPipelineImage]
+PipelineImage = Union[NDArray, TiledPipelineImage]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -44,7 +50,7 @@ class StepExecutionMetadata:
 class GpuExecutor(Protocol):
     """Protocol describing helpers capable of executing GPU steps."""
 
-    def execute(self, step: "PipelineStep", image: np.ndarray) -> np.ndarray:
+    def execute(self, step: "PipelineStep", image: NDArray) -> NDArray:
         """Execute ``step`` using an accelerator backend."""
 
 
@@ -72,7 +78,7 @@ class PipelineStep:
         if result is None:
             result = operand
         if self.execution.supports_inplace:
-            if isinstance(operand, np.ndarray) and isinstance(result, np.ndarray):
+            if isinstance(operand, NDArray) and isinstance(result, NDArray):
                 if result is operand:
                     return operand
                 if result.shape == operand.shape and result.dtype == operand.dtype:
@@ -320,14 +326,60 @@ class PipelineManager:
             step.params.update(params)
 
     def apply(self, image: PipelineImage) -> PipelineImage:
-        result: PipelineImage = image.copy() if isinstance(image, np.ndarray) else image
+        if isinstance(image, TiledPipelineImage):
+            return self._apply_tiled(image)
+
+        result: PipelineImage = image.copy() if isinstance(image, NDArray) else image
         for step in self.iter_enabled_steps():
             result = self._run_step(step, result)
         return result
 
+    def _apply_tiled(self, image: TiledPipelineImage) -> PipelineImage:
+        enabled_steps = list(self.iter_enabled_steps())
+        if not enabled_steps:
+            return image
+
+        # If any step supports tiled inputs we fall back to the regular
+        # execution path so each step can request tiles directly.
+        if any(step.supports_tiled_input for step in enabled_steps):
+            result: PipelineImage = image
+            for step in enabled_steps:
+                result = self._run_step(step, result)
+            return result
+
+        tile_size = image.tile_size
+        shape = image.infer_shape()
+        dtype = image.dtype or np.float32
+        assembled: Optional[np.ndarray] = None
+
+        for box, tile in image.iter_tiles(tile_size):
+            tile_result: PipelineImage = np.array(tile, copy=True)
+            for step in enabled_steps:
+                tile_result = self._run_step(step, tile_result)
+                if isinstance(tile_result, TiledPipelineImage):
+                    tile_result = tile_result.to_array()
+            tile_array = np.array(tile_result, copy=False)
+            if assembled is None:
+                dtype = tile_array.dtype
+                assembled = np.zeros(shape, dtype=dtype)
+            self._paste_tile(assembled, box, tile_array)
+
+        if assembled is None:
+            # No tiles were produced; return a dense copy for consistency.
+            return image.to_array()
+        return assembled
+
+    @staticmethod
+    def _paste_tile(target: np.ndarray, box: TileBox, tile: np.ndarray) -> None:
+        left, top, right, bottom = box
+        if target.ndim == 2:
+            target[top:bottom, left:right] = tile
+        else:
+            target[top:bottom, left:right, ...] = tile
+
     def _run_step(self, step: PipelineStep, image: PipelineImage) -> PipelineImage:
         if step.execution.requires_gpu and self._gpu_executor is not None:
-            array_input = image if isinstance(image, np.ndarray) else image.to_array()
+            array_input = image if isinstance(image, NDArray) else image.to_array()
             result = self._gpu_executor.execute(step, array_input)
             if result is None:
                 return array_input
@@ -338,7 +390,7 @@ class PipelineManager:
                 "Step '%s' requires GPU execution but no executor is configured; falling back to CPU.",
                 step.name,
             )
-            array_input = image if isinstance(image, np.ndarray) else image.to_array()
+            array_input = image if isinstance(image, NDArray) else image.to_array()
             return step.apply(array_input)
         return step.apply(image)
 

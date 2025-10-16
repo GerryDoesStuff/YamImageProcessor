@@ -13,17 +13,23 @@ import traceback
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Protocol, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Protocol, Tuple, Union
 
 import numpy as np
 
-from processing.tiled_records import TiledPipelineImage
+from processing.tiled_records import TiledPipelineImage, TileSize
+from core.tiled_image import TileBox
+
+try:  # pragma: no cover - defensive fallback when numpy stubs lack ndarray
+    NDArray = np.ndarray
+except AttributeError:  # pragma: no cover - executed in minimal test environments
+    NDArray = type(None)
 
 
 LOGGER = logging.getLogger(__name__)
 
 
-PipelineImage = Union[np.ndarray, TiledPipelineImage]
+PipelineImage = Union[NDArray, TiledPipelineImage]
 
 
 @dataclass
@@ -128,7 +134,7 @@ class PipelineStep:
         if result is None:
             result = operand
         if self.execution.supports_inplace:
-            if isinstance(operand, np.ndarray) and isinstance(result, np.ndarray):
+            if isinstance(operand, NDArray) and isinstance(result, NDArray):
                 if result is operand:
                     return operand
                 if result.shape == operand.shape and result.dtype == operand.dtype:
@@ -621,7 +627,26 @@ class PipelineManager:
         storage. ``cache_dir`` can be used to redirect disk backed artefacts.
         """
 
-        processed: PipelineImage = image.copy() if isinstance(image, np.ndarray) else image
+        if isinstance(image, TiledPipelineImage) and self._should_stream_tiled():
+            return self._apply_streaming_pipeline(
+                image,
+                cache_threshold_bytes=cache_threshold_bytes,
+                cache_dir=cache_dir,
+            )
+        return self._apply_eager_pipeline(
+            image,
+            cache_threshold_bytes=cache_threshold_bytes,
+            cache_dir=cache_dir,
+        )
+
+    def _apply_eager_pipeline(
+        self,
+        image: PipelineImage,
+        *,
+        cache_threshold_bytes: int,
+        cache_dir: Optional[os.PathLike[str] | str],
+    ) -> PipelineImage:
+        processed: PipelineImage = image.copy() if isinstance(image, NDArray) else image
         intermediates: Dict[str, CachedArray] = {}
         self._last_failure = None
         cache_directory = os.fspath(cache_dir) if cache_dir is not None else self._cache_dir
@@ -644,13 +669,13 @@ class PipelineManager:
                 )
                 raise PipelineExecutionError(failure) from exc
 
-            cache_ready = processed if isinstance(processed, np.ndarray) else processed.to_array()
+            cache_ready = processed if isinstance(processed, NDArray) else processed.to_array()
             intermediates[step.name] = CachedArray.from_array(
                 cache_ready,
                 threshold_bytes=cache_threshold_bytes,
                 cache_dir=cache_directory,
             )
-        final_array = processed if isinstance(processed, np.ndarray) else processed.to_array()
+        final_array = processed if isinstance(processed, NDArray) else processed.to_array()
         final_cache = CachedArray.from_optional(
             final_array,
             threshold_bytes=cache_threshold_bytes,
@@ -664,6 +689,133 @@ class PipelineManager:
         self._last_execution_entry = entry.clone()
         return processed
 
+    def _should_stream_tiled(self) -> bool:
+        for step in self.steps:
+            if step.enabled and not step.supports_tiled_input:
+                return True
+        return False
+
+    def _apply_streaming_pipeline(
+        self,
+        image: TiledPipelineImage,
+        *,
+        cache_threshold_bytes: int,
+        cache_dir: Optional[os.PathLike[str] | str],
+    ) -> np.ndarray:
+        intermediates: Dict[str, CachedArray] = {}
+        self._last_failure = None
+        cache_directory = os.fspath(cache_dir) if cache_dir is not None else self._cache_dir
+        tile_size = image.tile_size
+        shape = image.infer_shape()
+        current_array: Optional[np.ndarray] = None
+        tile_boxes: Optional[List[TileBox]] = None
+
+        for step in self.steps:
+            try:
+                current_array, tile_boxes = self._stream_step(
+                    step,
+                    image,
+                    current_array,
+                    tile_boxes,
+                    shape,
+                    tile_size,
+                )
+            except Exception as exc:
+                traceback_text = traceback.format_exc()
+                recovery_path = self._write_recovery_trace(step.name, traceback_text)
+                step.enabled = False
+                failure = PipelineFailure(step.name, exc, traceback_text, recovery_path)
+                self._last_failure = failure
+                LOGGER.error(
+                    "Pipeline step failed",
+                    exc_info=exc,
+                    extra={
+                        "step": step.name,
+                        "recovery_path": str(recovery_path),
+                    },
+                )
+                raise PipelineExecutionError(failure) from exc
+
+            intermediates[step.name] = CachedArray.from_array(
+                current_array,
+                threshold_bytes=cache_threshold_bytes,
+                cache_dir=cache_directory,
+            )
+
+        if current_array is None:
+            current_array = image.to_array()
+
+        final_cache = CachedArray.from_optional(
+            current_array,
+            threshold_bytes=cache_threshold_bytes,
+            cache_dir=cache_directory,
+        )
+        entry = PipelineHistoryEntry(
+            self._snapshot_steps(),
+            final_cache,
+            intermediates,
+        )
+        self._last_execution_entry = entry.clone()
+        return current_array
+
+    def _stream_step(
+        self,
+        step: PipelineStep,
+        image: TiledPipelineImage,
+        current_array: Optional[np.ndarray],
+        tile_boxes: Optional[List[TileBox]],
+        shape: Tuple[int, ...],
+        tile_size: Optional[TileSize],
+    ) -> Tuple[np.ndarray, List[TileBox]]:
+        boxes = tile_boxes if tile_boxes is not None else []
+        output: Optional[np.ndarray] = None
+
+        if current_array is None:
+            iterator = image.iter_tiles(tile_size)
+        else:
+            if not boxes:
+                raise ValueError("tile_boxes must be defined when streaming subsequent steps")
+            iterator = ((box, self._extract_tile(current_array, box)) for box in boxes)
+
+        for index, (box, tile) in enumerate(iterator):
+            if tile_boxes is None:
+                boxes.append(box)
+            operand: PipelineImage = np.array(tile, copy=True)
+            result = self._run_step(step, operand)
+            if isinstance(result, TiledPipelineImage):
+                result = result.to_array()
+            tile_array = np.array(result, copy=False)
+            if output is None:
+                output = np.zeros(shape, dtype=tile_array.dtype)
+            self._paste_tile(output, box, tile_array)
+
+        if output is None:
+            if current_array is not None:
+                output = np.array(current_array, copy=True)
+            else:
+                output = image.to_array()
+                if not boxes:
+                    height, width = output.shape[0], output.shape[1]
+                    boxes = [(0, 0, width, height)]
+
+        return output, boxes
+
+    @staticmethod
+    def _extract_tile(array: np.ndarray, box: TileBox) -> np.ndarray:
+        left, top, right, bottom = box
+        slices = (slice(top, bottom), slice(left, right))
+        if array.ndim > 2:
+            slices += (slice(None),)
+        return array[slices]
+
+    @staticmethod
+    def _paste_tile(target: np.ndarray, box: TileBox, tile: np.ndarray) -> None:
+        left, top, right, bottom = box
+        if target.ndim == 2:
+            target[top:bottom, left:right] = tile
+        else:
+            target[top:bottom, left:right, ...] = tile
+
     def _run_step(self, step: PipelineStep, image: PipelineImage) -> PipelineImage:
         """Execute ``step`` honouring execution metadata."""
 
@@ -671,7 +823,7 @@ class PipelineManager:
             return image
 
         if step.execution.requires_gpu:
-            array_input = image if isinstance(image, np.ndarray) else image.to_array()
+            array_input = image if isinstance(image, NDArray) else image.to_array()
             if self._gpu_executor is None:
                 LOGGER.warning(
                     "Step '%s' requires GPU execution but no executor is configured; falling back to CPU.",
@@ -681,7 +833,7 @@ class PipelineManager:
             result = self._gpu_executor.execute(step, array_input)
             if result is None:
                 result = array_input
-            if step.execution.supports_inplace and isinstance(result, np.ndarray):
+            if step.execution.supports_inplace and isinstance(result, NDArray):
                 if result is array_input:
                     return array_input
                 if result.shape == array_input.shape and result.dtype == array_input.dtype:
