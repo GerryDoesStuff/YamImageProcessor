@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from core.app_core import AppCore
+from core.app_core import AppCore, UpdateDispatcher, UpdateMetadata
 from core.path_sanitizer import PathValidationError, sanitize_user_path
 from core.preprocessing import Config, Loader
 from core.thread_controller import OperationCancelled, ThreadController
@@ -71,6 +71,69 @@ class ImageDisplayWidget(QtWidgets.QLabel):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.update_pixmap()
+
+
+class UpdateNotificationDialog(QtWidgets.QDialog):
+    """Simple dialog presenting update notes and helpful links."""
+
+    def __init__(self, metadata: UpdateMetadata, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self._metadata = metadata
+        self.setWindowTitle(self.tr("Application Update Available"))
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        header = QtWidgets.QLabel(
+            self.tr("A new version ({version}) is available.").format(version=metadata.version)
+        )
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        self.notes_browser = QtWidgets.QTextBrowser(self)
+        self.notes_browser.setReadOnly(True)
+        if metadata.notes:
+            self.notes_browser.setPlainText(metadata.notes)
+        else:
+            self.notes_browser.setPlainText(self.tr("No release notes were provided."))
+        layout.addWidget(self.notes_browser)
+
+        self.release_notes_link: Optional[QtWidgets.QLabel]
+        if metadata.release_notes_url:
+            self.release_notes_link = QtWidgets.QLabel(self)
+            self.release_notes_link.setText(
+                '<a href="{url}">{text}</a>'.format(
+                    url=metadata.release_notes_url,
+                    text=self.tr("View full release notes"),
+                )
+            )
+            self.release_notes_link.setTextFormat(QtCore.Qt.RichText)
+            self.release_notes_link.setTextInteractionFlags(QtCore.Qt.TextBrowserInteraction)
+            self.release_notes_link.setOpenExternalLinks(True)
+            layout.addWidget(self.release_notes_link)
+        else:
+            self.release_notes_link = None
+
+        button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok, parent=self)
+        button_box.accepted.connect(self.accept)
+
+        self.download_button: Optional[QtWidgets.QPushButton]
+        if metadata.download_url:
+            self.download_button = button_box.addButton(
+                self.tr("Download"), QtWidgets.QDialogButtonBox.ActionRole
+            )
+            self.download_button.clicked.connect(self._open_download_url)
+        else:
+            self.download_button = None
+
+        layout.addWidget(button_box)
+
+    def metadata(self) -> UpdateMetadata:
+        return self._metadata
+
+    def _open_download_url(self) -> None:
+        if not self._metadata.download_url:
+            return
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl(self._metadata.download_url))
 
 
 def _apply_common_metadata(widget: QtWidgets.QWidget, metadata: Optional[ControlMetadata]) -> None:
@@ -543,6 +606,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, app_core: AppCore):
         super().__init__()
         self.app_core = app_core
+        self._init_update_notifications()
         self.setWindowTitle("Image Pre-Processing Module")
         self.resize(1200, 700)
         window_icon = load_icon(
@@ -803,6 +867,47 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_pipeline_label()
         if self.base_image is not None:
             self.update_preview()
+
+    # ------------------------------------------------------------------
+    # Update notification helpers
+    def _init_update_notifications(self) -> None:
+        self._pending_update: Optional[UpdateMetadata] = None
+        self._update_dispatcher: Optional[UpdateDispatcher] = None
+        self._update_dialog_factory: Callable[[UpdateMetadata], QtWidgets.QDialog] = (
+            lambda metadata: UpdateNotificationDialog(metadata, self)
+        )
+        dispatcher = getattr(self.app_core, "update_dispatcher", None)
+        if isinstance(dispatcher, UpdateDispatcher):
+            self.set_update_dispatcher(dispatcher)
+
+    def set_update_dispatcher(self, dispatcher: UpdateDispatcher) -> None:
+        if self._update_dispatcher is dispatcher:
+            return
+        if self._update_dispatcher is not None:
+            self._update_dispatcher.remove_listener(self._on_update_available)
+        self._update_dispatcher = dispatcher
+        dispatcher.add_listener(self._on_update_available)
+
+    def _on_update_available(self, metadata: UpdateMetadata) -> None:
+        self._pending_update = metadata
+        dialog = self._create_update_dialog(metadata)
+        try:
+            dialog.exec_()
+        finally:
+            self.acknowledge_available_update()
+            self._pending_update = None
+
+    def _create_update_dialog(self, metadata: UpdateMetadata) -> QtWidgets.QDialog:
+        return self._update_dialog_factory(metadata)
+
+    def acknowledge_available_update(self) -> None:
+        if self._update_dispatcher is not None:
+            self._update_dispatcher.acknowledge()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        if self._update_dispatcher is not None:
+            self._update_dispatcher.remove_listener(self._on_update_available)
+        super().closeEvent(event)
 
     def update_pipeline_label(self):
         order = [step.name for step in self.pipeline_manager.iter_enabled_steps()]

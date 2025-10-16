@@ -31,16 +31,21 @@ class _FunctionRunnable(QtCore.QRunnable):
         function: Callable[[threading.Event, Callable[[int], None]], Any],
         cancel_event: threading.Event,
         signals: _WorkerSignals,
+        pause_event: threading.Event,
     ) -> None:
         super().__init__()
         self.setAutoDelete(True)
         self._function = function
         self._cancel_event = cancel_event
         self._signals = signals
+        self._pause_event = pause_event
 
     @QtCore.pyqtSlot()
     def run(self) -> None:  # pragma: no cover - executed on worker thread
         try:
+            while not self._pause_event.wait(0.1):
+                if self._cancel_event.is_set():
+                    raise OperationCancelled()
             result = self._function(self._cancel_event, self._signals.progress.emit)
         except OperationCancelled:
             self._signals.canceled.emit()
@@ -81,6 +86,9 @@ class ThreadController(QtCore.QObject):
         self._callbacks: _TaskCallbacks = _TaskCallbacks()
         self._signals: Optional[_WorkerSignals] = None
         self._task_lock = threading.Lock()
+        self._pause_event = threading.Event()
+        self._pause_event.set()
+        self._paused = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -88,6 +96,30 @@ class ThreadController(QtCore.QObject):
         """Return ``True`` when a background task is active."""
 
         return self._cancel_event is not None
+
+    def is_paused(self) -> bool:
+        """Return ``True`` if new tasks should wait before executing."""
+
+        with self._task_lock:
+            return self._paused
+
+    def pause(self) -> None:
+        """Prevent tasks from executing until :meth:`resume` is called."""
+
+        with self._task_lock:
+            if self._paused:
+                return
+            self._paused = True
+            self._pause_event.clear()
+
+    def resume(self) -> None:
+        """Allow paused tasks to resume execution."""
+
+        with self._task_lock:
+            if not self._paused:
+                return
+            self._paused = False
+            self._pause_event.set()
 
     def cancel(self) -> None:
         """Request cancellation of the currently running task, if any."""
@@ -99,6 +131,7 @@ class ThreadController(QtCore.QObject):
     def shutdown(self) -> None:
         """Drain the underlying thread pool."""
 
+        self.resume()
         self.cancel()
         self._thread_pool.waitForDone()
 
@@ -115,7 +148,7 @@ class ThreadController(QtCore.QObject):
 
         cancel_event = threading.Event()
         signals = _WorkerSignals()
-        runnable = _FunctionRunnable(function, cancel_event, signals)
+        runnable = _FunctionRunnable(function, cancel_event, signals, self._pause_event)
 
         with self._task_lock:
             self._cancel_event = cancel_event
