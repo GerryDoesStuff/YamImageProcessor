@@ -24,9 +24,9 @@ class StageApplicationSpec:
 
     stage: ModuleStage
     title: str
-    description: str = ""
     configuration_factory: Callable[[], AppConfiguration] = field(repr=False)
     window_factory: Callable[[AppCore], QtWidgets.QMainWindow] = field(repr=False)
+    description: str = ""
 
 
 def default_stage_specifications() -> list[StageApplicationSpec]:
