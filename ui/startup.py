@@ -1,22 +1,22 @@
-"""Reusable startup dialog that allows toggling diagnostics and modules."""
+"""Startup dialog presenting available processing environments."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 from PyQt5 import QtCore, QtWidgets
 
-from core.app_core import AppCore
 from plugins.module_base import ModuleStage
 
 
-@dataclass
-class _ModuleEntry:
-    identifier: str
+@dataclass(frozen=True)
+class StartupModuleOption:
+    """Describe a selectable processing environment."""
+
+    stage: ModuleStage
     title: str
-    description: str
-    default_checked: bool
+    description: str = ""
 
 
 class StartupDialog(QtWidgets.QDialog):
@@ -24,14 +24,14 @@ class StartupDialog(QtWidgets.QDialog):
 
     def __init__(
         self,
-        app_core: AppCore,
-        stage: ModuleStage,
+        module_options: Iterable[StartupModuleOption],
+        *,
+        diagnostics_enabled: bool = False,
         parent: Optional[QtWidgets.QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self._app_core = app_core
-        self._stage = stage
-        self._module_checkboxes: Dict[str, QtWidgets.QCheckBox] = {}
+        self._module_options: Sequence[StartupModuleOption] = tuple(module_options)
+        self._selected_stage: ModuleStage | None = None
 
         self.setWindowTitle(self.tr("Application Startup Configuration"))
         self.setModal(True)
@@ -40,44 +40,43 @@ class StartupDialog(QtWidgets.QDialog):
 
         header = QtWidgets.QLabel(
             self.tr(
-                "Select the {stage} modules to enable and choose whether diagnostics logging"
-                " should start enabled."
-            ).format(stage=self._format_stage_name(stage))
+                "Select the processing environment to launch and choose whether diagnostics"
+                " logging should start enabled."
+            )
         )
         header.setWordWrap(True)
         layout.addWidget(header)
 
-        module_entries = list(self._build_module_entries())
-        if module_entries:
-            module_group = QtWidgets.QGroupBox(
-                self.tr("{stage} modules").format(
-                    stage=self._format_stage_name(stage)
-                )
-            )
+        self._button_group = QtWidgets.QButtonGroup(self)
+        self._button_group.setExclusive(True)
+        self._button_group.buttonClicked[int].connect(self._update_selected_stage)
+
+        if self._module_options:
+            module_group = QtWidgets.QGroupBox(self.tr("Available environments"))
             module_layout = QtWidgets.QVBoxLayout(module_group)
-            for entry in module_entries:
-                checkbox = QtWidgets.QCheckBox(entry.title, module_group)
-                checkbox.setChecked(entry.default_checked)
-                if entry.description:
-                    checkbox.setToolTip(entry.description)
-                    checkbox.setStatusTip(entry.description)
-                module_layout.addWidget(checkbox)
-                self._module_checkboxes[entry.identifier] = checkbox
+            for index, option in enumerate(self._module_options):
+                button = QtWidgets.QRadioButton(option.title, module_group)
+                if option.description:
+                    button.setToolTip(option.description)
+                    button.setStatusTip(option.description)
+                self._button_group.addButton(button, index)
+                module_layout.addWidget(button)
+                if index == 0:
+                    button.setChecked(True)
             module_layout.addStretch(1)
             layout.addWidget(module_group)
         else:
             empty_label = QtWidgets.QLabel(
-                self.tr("No modules are currently registered for this stage.")
+                self.tr("No processing environments are currently available.")
             )
             empty_label.setAlignment(QtCore.Qt.AlignHCenter)
             empty_label.setObjectName("startupDialogEmptyLabel")
             layout.addWidget(empty_label)
 
-        diagnostics_enabled = self._initial_diagnostics_state()
         self._diagnostics_checkbox = QtWidgets.QCheckBox(
             self.tr("Enable diagnostics logging"), self
         )
-        self._diagnostics_checkbox.setChecked(diagnostics_enabled)
+        self._diagnostics_checkbox.setChecked(bool(diagnostics_enabled))
         self._diagnostics_checkbox.setToolTip(
             self.tr(
                 "Diagnostics logging increases verbosity and unlocks additional telemetry "
@@ -95,44 +94,37 @@ class StartupDialog(QtWidgets.QDialog):
         )
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
+        button_box.button(QtWidgets.QDialogButtonBox.Ok).setEnabled(bool(self._module_options))
         layout.addWidget(button_box)
 
-    @staticmethod
-    def _format_stage_name(stage: ModuleStage) -> str:
-        return stage.value.replace("_", " ").title()
+        self._selected_stage = self._resolve_selected_stage()
 
-    def _build_module_entries(self) -> Iterable[_ModuleEntry]:
-        modules = sorted(
-            self._app_core.iter_modules(self._stage),
-            key=lambda module: module.metadata.title.lower(),
-        )
-        for module in modules:
-            metadata = module.metadata
-            yield _ModuleEntry(
-                identifier=metadata.identifier,
-                title=metadata.title,
-                description=metadata.description,
-                default_checked=self._app_core.module_enabled(
-                    self._stage, metadata.identifier
-                ),
-            )
+    def _update_selected_stage(self, _: int) -> None:
+        self._selected_stage = self._resolve_selected_stage()
 
-    def _initial_diagnostics_state(self) -> bool:
-        settings = getattr(self._app_core, "settings_manager", None)
-        if settings is not None:
-            if settings.contains("diagnostics/enabled"):
-                return settings.get_bool("diagnostics/enabled", False)
-        return self._app_core.diagnostics_enabled
+    def _resolve_selected_stage(self) -> ModuleStage | None:
+        checked_id = self._button_group.checkedId()
+        if checked_id == -1:
+            return None
+        if 0 <= checked_id < len(self._module_options):
+            return self._module_options[checked_id].stage
+        return None
 
     def accept(self) -> None:  # type: ignore[override]
-        for identifier, checkbox in self._module_checkboxes.items():
-            self._app_core.set_module_enabled(
-                self._stage, identifier, checkbox.isChecked()
-            )
-        self._app_core.set_diagnostics_enabled(
-            self._diagnostics_checkbox.isChecked(), persist=True
-        )
+        self._selected_stage = self._resolve_selected_stage()
         super().accept()
 
+    @property
+    def selected_stage(self) -> ModuleStage | None:
+        """Return the processing stage selected by the user, if any."""
 
-__all__ = ["StartupDialog"]
+        return self._selected_stage
+
+    @property
+    def diagnostics_enabled(self) -> bool:
+        """Return whether diagnostics logging should be enabled."""
+
+        return self._diagnostics_checkbox.isChecked()
+
+
+__all__ = ["StartupDialog", "StartupModuleOption"]

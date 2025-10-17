@@ -1,119 +1,170 @@
-"""Tests covering the StartupDialog workflow."""
+"""Tests covering the StartupDialog workflow and launcher integration."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable
+from typing import Dict, List
 
-import numpy as np
 import pytest
 
 QtWidgets = pytest.importorskip("PyQt5.QtWidgets", exc_type=ImportError)
 
-from plugins.module_base import ModuleBase, ModuleMetadata, ModuleStage
-from ui.startup import StartupDialog
+from core.app_core import AppConfiguration
+from core.application_launcher import StageApplicationSpec, launch_stage_applications
+from plugins.module_base import ModuleStage
+from ui.startup import StartupDialog, StartupModuleOption
 
 
-class _FakeSettings:
-    def __init__(self, initial: Dict[str, bool] | None = None) -> None:
-        self._store: Dict[str, bool] = dict(initial or {})
-
-    def contains(self, key: str) -> bool:
-        return key in self._store
-
-    def get_bool(self, key: str, default: bool = False) -> bool:
-        return bool(self._store.get(key, default))
+def _module_options() -> list[StartupModuleOption]:
+    return [
+        StartupModuleOption(ModuleStage.PREPROCESSING, "Preprocessing", "Prepare imagery"),
+        StartupModuleOption(ModuleStage.SEGMENTATION, "Segmentation", "Detect regions"),
+        StartupModuleOption(ModuleStage.ANALYSIS, "Extraction", "Measure features"),
+    ]
 
 
-class _FakeModule(ModuleBase):
-    def __init__(self, identifier: str, title: str, stage: ModuleStage, description: str = "") -> None:
-        self._metadata = ModuleMetadata(
-            identifier=identifier,
-            title=title,
-            stage=stage,
-            description=description,
-        )
-        super().__init__()
-
-    def _build_metadata(self) -> ModuleMetadata:  # type: ignore[override]
-        return self._metadata
-
-    def process(self, image: np.ndarray, **_: object) -> np.ndarray:  # type: ignore[override]
-        return image
-
-
-@dataclass
-class _FakeCore:
-    modules: Dict[ModuleStage, Iterable[ModuleBase]]
-    enabled: Dict[ModuleStage, Dict[str, bool]]
-    diagnostics_enabled: bool = False
-    settings_seed: Dict[str, bool] | None = None
-
-    def __post_init__(self) -> None:
-        self.settings_manager = _FakeSettings(self.settings_seed)
-        self.module_calls: list[tuple[ModuleStage, str, bool]] = []
-        self.diagnostics_calls: list[tuple[bool, bool]] = []
-
-    def iter_modules(self, stage: ModuleStage):
-        return list(self.modules.get(stage, ()))
-
-    def module_enabled(self, stage: ModuleStage, identifier: str) -> bool:
-        return self.enabled.get(stage, {}).get(identifier, True)
-
-    def set_module_enabled(
-        self, stage: ModuleStage, identifier: str, enabled: bool, *, persist: bool = True
-    ) -> None:
-        self.module_calls.append((stage, identifier, bool(enabled)))
-        self.enabled.setdefault(stage, {})[identifier] = bool(enabled)
-
-    def set_diagnostics_enabled(self, enabled: bool, *, persist: bool = True) -> None:
-        self.diagnostics_calls.append((bool(enabled), persist))
-        self.diagnostics_enabled = bool(enabled)
-
-
-@pytest.fixture
-def sample_core() -> _FakeCore:
-    module_a = _FakeModule("A", "Alpha", ModuleStage.PREPROCESSING, "First module")
-    module_b = _FakeModule("B", "Beta", ModuleStage.PREPROCESSING, "Second module")
-    return _FakeCore(
-        modules={ModuleStage.PREPROCESSING: (module_a, module_b)},
-        enabled={ModuleStage.PREPROCESSING: {"A": True, "B": False}},
-        diagnostics_enabled=False,
-        settings_seed={"diagnostics/enabled": True},
-    )
-
-
-def test_startup_dialog_persists_selections(qtbot, sample_core: _FakeCore) -> None:
-    dialog = StartupDialog(sample_core, ModuleStage.PREPROCESSING)
+def test_startup_dialog_returns_selected_stage(qtbot) -> None:
+    dialog = StartupDialog(_module_options(), diagnostics_enabled=True)
     qtbot.addWidget(dialog)
 
-    alpha_checkbox = dialog.findChild(QtWidgets.QCheckBox, None)
-    assert alpha_checkbox is not None
+    # Select the segmentation environment and disable diagnostics.
+    radio_buttons = dialog.findChildren(QtWidgets.QRadioButton)
+    assert len(radio_buttons) == 3
+    radio_buttons[1].setChecked(True)
 
-    # Toggle the modules and diagnostics selections.
-    for checkbox in dialog.findChildren(QtWidgets.QCheckBox):
-        if checkbox is dialog._diagnostics_checkbox:
-            checkbox.setChecked(False)
-        else:
-            checkbox.setChecked(not checkbox.isChecked())
+    diagnostics_checkbox = dialog.findChild(QtWidgets.QCheckBox)
+    assert diagnostics_checkbox is not None
+    diagnostics_checkbox.setChecked(False)
 
     dialog.accept()
     assert dialog.result() == QtWidgets.QDialog.Accepted
-
-    assert sample_core.enabled[ModuleStage.PREPROCESSING]["A"] is False
-    assert sample_core.enabled[ModuleStage.PREPROCESSING]["B"] is True
-    assert sample_core.diagnostics_enabled is False
-    assert len(sample_core.module_calls) == 2
-    assert sample_core.diagnostics_calls == [(False, True)]
+    assert dialog.selected_stage == ModuleStage.SEGMENTATION
+    assert dialog.diagnostics_enabled is False
 
 
-def test_startup_dialog_cancel_leaves_state(qtbot, sample_core: _FakeCore) -> None:
-    dialog = StartupDialog(sample_core, ModuleStage.PREPROCESSING)
+def test_startup_dialog_disables_accept_without_options(qtbot) -> None:
+    dialog = StartupDialog([], diagnostics_enabled=False)
     qtbot.addWidget(dialog)
 
-    dialog.reject()
-    assert dialog.result() == QtWidgets.QDialog.Rejected
-    assert sample_core.enabled[ModuleStage.PREPROCESSING]["A"] is True
-    assert sample_core.enabled[ModuleStage.PREPROCESSING]["B"] is False
-    assert sample_core.diagnostics_enabled is False
-    assert sample_core.module_calls == []
-    assert sample_core.diagnostics_calls == []
+    button_box = dialog.findChild(QtWidgets.QDialogButtonBox)
+    assert button_box is not None
+    ok_button = button_box.button(QtWidgets.QDialogButtonBox.Ok)
+    assert ok_button is not None
+    assert ok_button.isEnabled() is False
+
+    dialog.accept()
+    assert dialog.selected_stage is None
+
+
+def test_launcher_uses_selected_stage(monkeypatch) -> None:
+    import core.application_launcher as launcher
+
+    created_configs: List[AppConfiguration] = []
+    created_cores: List[_FakeAppCore] = []
+
+    @dataclass
+    class _FakeAppCore:
+        config: AppConfiguration
+
+        def __post_init__(self) -> None:
+            self.bootstrapped = False
+            self.diagnostics_calls: List[tuple[bool, bool]] = []
+            self.shutdown_called = False
+            created_configs.append(self.config)
+            created_cores.append(self)
+
+        def ensure_bootstrapped(self) -> None:
+            self.bootstrapped = True
+
+        def set_diagnostics_enabled(self, enabled: bool, *, persist: bool = True) -> None:
+            self.diagnostics_calls.append((enabled, persist))
+
+        def shutdown(self) -> None:
+            self.shutdown_called = True
+
+    monkeypatch.setattr(launcher, "AppCore", _FakeAppCore)
+
+    class _FakeWindow:
+        def __init__(self) -> None:
+            self.shown = False
+
+        def show(self) -> None:
+            self.shown = True
+
+    windows: List[_FakeWindow] = []
+
+    def window_factory(_: _FakeAppCore) -> _FakeWindow:
+        window = _FakeWindow()
+        windows.append(window)
+        return window
+
+    spec = StageApplicationSpec(
+        stage=ModuleStage.SEGMENTATION,
+        title="Segmentation",
+        description="Detect regions",
+        configuration_factory=lambda: AppConfiguration(
+            organization="Org", application="SegApp"
+        ),
+        window_factory=window_factory,
+    )
+
+    class _FakeDialog:
+        def __init__(self, options, diagnostics_enabled: bool = False) -> None:
+            self.options = options
+            self._diagnostics_enabled = True
+            self._selected_stage = ModuleStage.SEGMENTATION
+
+        def exec_(self) -> int:
+            return QtWidgets.QDialog.Accepted
+
+        @property
+        def selected_stage(self) -> ModuleStage:
+            return self._selected_stage
+
+        @property
+        def diagnostics_enabled(self) -> bool:
+            return self._diagnostics_enabled
+
+    class _FakeApplication:
+        def __init__(self) -> None:
+            self.properties: Dict[str, object] = {}
+            self.exec_calls = 0
+
+        def setProperty(self, key: str, value: object) -> None:
+            self.properties[key] = value
+
+        def exec_(self) -> int:
+            self.exec_calls += 1
+            return 42
+
+    fake_app = _FakeApplication()
+    translation_calls: List[tuple[object, object]] = []
+
+    def fake_translation_bootstrapper(app: object, config: object) -> object:
+        translation_calls.append((app, config))
+        return "translator"
+
+    themed_apps: List[object] = []
+
+    def fake_theme_applier(app: object) -> None:
+        themed_apps.append(app)
+
+    exit_code = launch_stage_applications(
+        [spec],
+        dialog_factory=_FakeDialog,
+        application_factory=lambda: fake_app,
+        theme_applier=fake_theme_applier,
+        translation_bootstrapper=fake_translation_bootstrapper,
+        translation_config_factory=lambda _: "translation-config",
+        initial_diagnostics=False,
+    )
+
+    assert exit_code == 42
+    assert fake_app.properties.get("core.translation_loader") == "translator"
+    assert themed_apps == [fake_app]
+    assert len(created_configs) == 1
+    assert created_configs[0].diagnostics_enabled is True
+    assert created_cores[0].bootstrapped is True
+    assert created_cores[0].diagnostics_calls == [(True, True)]
+    assert created_cores[0].shutdown_called is True
+    assert windows and windows[0].shown is True
+    assert translation_calls == [(fake_app, "translation-config")]
