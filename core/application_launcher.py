@@ -14,9 +14,6 @@ from core.extraction import Config as ExtractionConfig
 from core.preprocessing import Config as PreprocessingConfig
 from core.segmentation import Config as SegmentationConfig
 from plugins.module_base import ModuleStage
-from ui.extraction import MainWindow as ExtractionMainWindow
-from ui.preprocessing import MainWindow as PreprocessingMainWindow
-from ui.segmentation import MainWindow as SegmentationMainWindow
 from ui.startup import StartupDialog, StartupModuleOption
 from ui.theme import apply_application_theme
 
@@ -44,7 +41,7 @@ def default_stage_specifications() -> list[StageApplicationSpec]:
                 organization=PreprocessingConfig.SETTINGS_ORG,
                 application=PreprocessingConfig.SETTINGS_APP,
             ),
-            window_factory=lambda core: PreprocessingMainWindow(core),
+            window_factory=_create_preprocessing_window,
         ),
         StageApplicationSpec(
             stage=ModuleStage.SEGMENTATION,
@@ -54,7 +51,7 @@ def default_stage_specifications() -> list[StageApplicationSpec]:
                 organization=SegmentationConfig.SETTINGS_ORG,
                 application=SegmentationConfig.SETTINGS_APP,
             ),
-            window_factory=lambda core: SegmentationMainWindow(core),
+            window_factory=_create_segmentation_window,
         ),
         StageApplicationSpec(
             stage=ModuleStage.ANALYSIS,
@@ -64,9 +61,33 @@ def default_stage_specifications() -> list[StageApplicationSpec]:
                 organization=ExtractionConfig.SETTINGS_ORG,
                 application=ExtractionConfig.SETTINGS_APP,
             ),
-            window_factory=lambda core: ExtractionMainWindow(core),
+            window_factory=_create_extraction_window,
         ),
     ]
+
+
+def _create_preprocessing_window(core: AppCore) -> QtWidgets.QMainWindow:
+    """Import and construct the preprocessing main window lazily."""
+
+    from ui.preprocessing import MainWindow as PreprocessingMainWindow
+
+    return PreprocessingMainWindow(core)
+
+
+def _create_segmentation_window(core: AppCore) -> QtWidgets.QMainWindow:
+    """Import and construct the segmentation main window lazily."""
+
+    from ui.segmentation import MainWindow as SegmentationMainWindow
+
+    return SegmentationMainWindow(core)
+
+
+def _create_extraction_window(core: AppCore) -> QtWidgets.QMainWindow:
+    """Import and construct the extraction main window lazily."""
+
+    from ui.extraction import MainWindow as ExtractionMainWindow
+
+    return ExtractionMainWindow(core)
 
 
 def launch_stage_applications(
