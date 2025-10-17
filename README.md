@@ -52,6 +52,12 @@ With the environment active, start the main application shell via:
 python preprocessing22.py
 ```
 
+Alternatively, you can invoke the module launcher directly:
+
+```bash
+python -m core.application_launcher
+```
+
 On launch a startup dialog prompts you to choose which preprocessing modules should be available and whether diagnostics logging starts enabled. The selections persist across sessions, replacing the previous `--diagnostics` command-line switch.
 
 On subsequent runs you can reactivate the existing virtual environment and repeat the same command without reinstalling the dependencies. If you prefer to start other entry points that ship with the project, the segmentation and feature extraction pipelines can be launched with:
