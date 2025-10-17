@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence
 
 from PyQt5 import QtCore, QtWidgets
 
+from core.settings import SettingsManager
 from plugins.module_base import ModuleStage
+
+
+_DEFAULT_SELECTION_KEY = "ui/startup/selected_stages"
 
 
 @dataclass(frozen=True)
@@ -17,6 +22,7 @@ class StartupModuleOption:
     stage: ModuleStage
     title: str
     description: str = ""
+    enabled_by_default: bool = True
 
 
 class StartupDialog(QtWidgets.QDialog):
@@ -27,11 +33,13 @@ class StartupDialog(QtWidgets.QDialog):
         module_options: Iterable[StartupModuleOption],
         *,
         diagnostics_enabled: bool = False,
+        settings: SettingsManager | None = None,
         parent: Optional[QtWidgets.QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._module_options: Sequence[StartupModuleOption] = tuple(module_options)
-        self._selected_stage: ModuleStage | None = None
+        self._settings = settings
+        self._selected_stages: list[ModuleStage] = []
 
         self.setWindowTitle(self.tr("Application Startup Configuration"))
         self.setModal(True)
@@ -40,32 +48,48 @@ class StartupDialog(QtWidgets.QDialog):
 
         header = QtWidgets.QLabel(
             self.tr(
-                "Select the processing environment to launch and choose whether diagnostics"
+                "Select the processing environments to launch and choose whether diagnostics"
                 " logging should start enabled."
             )
         )
         header.setWordWrap(True)
         layout.addWidget(header)
 
-        self._button_group = QtWidgets.QButtonGroup(self)
-        self._button_group.setExclusive(True)
-        self._button_group.buttonClicked[int].connect(self._update_selected_stage)
-
         if self._module_options:
             module_group = QtWidgets.QGroupBox(self.tr("Available environments"))
             module_layout = QtWidgets.QVBoxLayout(module_group)
-            for index, option in enumerate(self._module_options):
-                button = QtWidgets.QRadioButton(option.title, module_group)
+
+            self._stage_list = QtWidgets.QListWidget(module_group)
+            self._stage_list.setObjectName("startupStageList")
+            self._stage_list.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
+            self._stage_list.itemChanged.connect(self._sync_selected_stages)
+
+            default_selection = self._load_default_selection()
+
+            for option in self._module_options:
+                item = QtWidgets.QListWidgetItem(option.title, self._stage_list)
+                item.setFlags(
+                    item.flags()
+                    | QtCore.Qt.ItemIsUserCheckable
+                    | QtCore.Qt.ItemIsSelectable
+                    | QtCore.Qt.ItemIsEnabled
+                )
+                item.setData(QtCore.Qt.UserRole, option.stage)
                 if option.description:
-                    button.setToolTip(option.description)
-                    button.setStatusTip(option.description)
-                self._button_group.addButton(button, index)
-                module_layout.addWidget(button)
-                if index == 0:
-                    button.setChecked(True)
-            module_layout.addStretch(1)
+                    item.setToolTip(option.description)
+                    item.setStatusTip(option.description)
+                is_checked = option.stage.name in default_selection
+                if not default_selection:
+                    is_checked = option.enabled_by_default
+                item.setCheckState(
+                    QtCore.Qt.Checked if is_checked else QtCore.Qt.Unchecked
+                )
+                self._stage_list.addItem(item)
+
+            module_layout.addWidget(self._stage_list)
             layout.addWidget(module_group)
         else:
+            self._stage_list = None
             empty_label = QtWidgets.QLabel(
                 self.tr("No processing environments are currently available.")
             )
@@ -94,31 +118,64 @@ class StartupDialog(QtWidgets.QDialog):
         )
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
-        button_box.button(QtWidgets.QDialogButtonBox.Ok).setEnabled(bool(self._module_options))
+        self._ok_button = button_box.button(QtWidgets.QDialogButtonBox.Ok)
+        self._ok_button.setEnabled(bool(self._module_options))
         layout.addWidget(button_box)
 
-        self._selected_stage = self._resolve_selected_stage()
+        self._sync_selected_stages()
 
-    def _update_selected_stage(self, _: int) -> None:
-        self._selected_stage = self._resolve_selected_stage()
+    def _load_default_selection(self) -> set[str]:
+        if self._settings is None:
+            return set()
+        payload = self._settings.get(_DEFAULT_SELECTION_KEY, "")
+        if not payload:
+            return set()
+        try:
+            data = json.loads(str(payload))
+        except (TypeError, ValueError):
+            return set()
+        if isinstance(data, list):
+            return {str(item) for item in data}
+        return set()
 
-    def _resolve_selected_stage(self) -> ModuleStage | None:
-        checked_id = self._button_group.checkedId()
-        if checked_id == -1:
-            return None
-        if 0 <= checked_id < len(self._module_options):
-            return self._module_options[checked_id].stage
-        return None
+    def _sync_selected_stages(self) -> None:
+        self._selected_stages = self._collect_selected_stages()
+        if hasattr(self, "_ok_button") and self._ok_button is not None:
+            self._ok_button.setEnabled(bool(self._selected_stages))
+
+    def _collect_selected_stages(self) -> list[ModuleStage]:
+        selections: list[ModuleStage] = []
+        if self._stage_list is None:
+            return selections
+        for index in range(self._stage_list.count()):
+            item = self._stage_list.item(index)
+            if item is None:
+                continue
+            if item.checkState() != QtCore.Qt.Checked:
+                continue
+            stage = item.data(QtCore.Qt.UserRole)
+            if isinstance(stage, ModuleStage):
+                selections.append(stage)
+        return selections
 
     def accept(self) -> None:  # type: ignore[override]
-        self._selected_stage = self._resolve_selected_stage()
+        self._sync_selected_stages()
+        if self._settings is not None:
+            payload = json.dumps([stage.name for stage in self._selected_stages])
+            self._settings.set(_DEFAULT_SELECTION_KEY, payload)
         super().accept()
 
     @property
-    def selected_stage(self) -> ModuleStage | None:
-        """Return the processing stage selected by the user, if any."""
+    def selected_stages(self) -> Sequence[ModuleStage]:
+        """Return the ordered list of selected processing stages."""
 
-        return self._selected_stage
+        return tuple(self._selected_stages)
+
+    @property
+    def selected_stage(self) -> ModuleStage | None:
+        """Return the first selected processing stage, if any."""
+
+        return self._selected_stages[0] if self._selected_stages else None
 
     @property
     def diagnostics_enabled(self) -> bool:
