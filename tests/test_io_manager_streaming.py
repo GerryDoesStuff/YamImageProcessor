@@ -13,7 +13,7 @@ try:  # pragma: no cover - import guard for optional dependency
 except ImportError:
     pytest.skip("cv2 with OpenGL support is required for IO manager streaming tests", allow_module_level=True)
 
-from core.io_manager import IOManager, TiledImageRecord
+from core.io_manager import DimensionalImageRecord, IOManager, TiledImageRecord
 from core.path_sanitizer import configure_allowed_roots
 
 
@@ -90,3 +90,17 @@ def test_lazy_memmap_read_region_matches_source(tmp_path: Path, io_manager: IOMa
 
     assert record._cached_array is None
     record.close()
+
+
+def test_save_and_load_dimensional_npz(tmp_path: Path, io_manager: IOManager) -> None:
+    cube = np.random.randint(0, 255, size=(4, 8, 6), dtype=np.uint8)
+    record = DimensionalImageRecord(data=cube, dims=("z", "y", "x"))
+    path = tmp_path / "volume.npz"
+
+    io_manager.save_image(path, record, metadata={"source": "synthetic"})
+
+    loaded, metadata = io_manager.load_image(path)
+    assert isinstance(loaded, DimensionalImageRecord)
+    assert metadata is not None
+    assert metadata["metadata"]["dims"] == ["z", "y", "x"]
+    np.testing.assert_array_equal(loaded.to_array(), cube)

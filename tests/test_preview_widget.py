@@ -50,6 +50,23 @@ def test_preview_widget_progressive_loading(qtbot) -> None:
     )
 
 
+def test_preview_widget_displays_nd_arrays(qtbot) -> None:
+    widget = PreviewWidget()
+    qtbot.addWidget(widget)
+
+    cube = np.arange(2 * 3 * 4, dtype=np.uint8).reshape(2, 3, 4)
+    widget.update_array(cube, dims=("z", "y", "x"))
+
+    qtbot.waitUntil(lambda: widget._image_buffer is not None, timeout=500)
+    assert widget._slice_controls.isVisible()
+    assert widget._axis_combo.count() == 1
+    assert widget._slice_slider.maximum() == 1
+    np.testing.assert_array_equal(widget._image_buffer, cube[1])
+
+    widget._slice_slider.setValue(0)
+    qtbot.waitUntil(lambda: np.array_equal(widget._image_buffer, cube[0]), timeout=500)
+
+
 def test_preview_widget_eager_path_for_single_level(qtbot) -> None:
     widget = PreviewWidget()
     qtbot.addWidget(widget)

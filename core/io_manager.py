@@ -1,6 +1,7 @@
 """Persistence helpers for image import/export with metadata sidecars."""
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
@@ -9,11 +10,32 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Tuple, Union
+
+if TYPE_CHECKING:  # pragma: no cover - only for static analysis
+    from yam_processor.data.image_io import DimensionalImageRecord as _DimensionalImageRecordType
+else:  # pragma: no cover - used at runtime when yam_processor is unavailable
+    _DimensionalImageRecordType = Any
 
 import cv2
 import numpy as np
 from PIL import Image
+
+_IMAGE_IO_MODULE: Any | None = None
+
+
+def _load_image_io_module() -> Any:
+    global _IMAGE_IO_MODULE
+    if _IMAGE_IO_MODULE is not None:
+        return _IMAGE_IO_MODULE
+    module_path = Path(__file__).resolve().parents[1] / "yam_processor" / "data" / "image_io.py"
+    spec = importlib.util.spec_from_file_location("_io_image_io", module_path)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise ImportError("Failed to load yam_processor.data.image_io")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _IMAGE_IO_MODULE = module
+    return module
 
 from .path_sanitizer import (
     PathValidationError,
@@ -55,9 +77,14 @@ class IOManager:
         ".png": "PNG",
         ".jpg": "JPEG",
         ".jpeg": "JPEG",
+        ".tif": "TIFF",
         ".tiff": "TIFF",
         ".bmp": "BMP",
         ".npy": "NPY",
+        ".npz": "NPZ",
+        ".h5": "HDF5",
+        ".hdf5": "HDF5",
+        ".hdf": "HDF5",
     }
 
     def __init__(self, settings: SettingsManager | Mapping[str, Any] | None = None) -> None:
@@ -100,7 +127,7 @@ class IOManager:
     def save_image(
         self,
         destination: str | os.PathLike[str],
-        image: np.ndarray,
+        image: Any,
         *,
         metadata: Mapping[str, Any] | None = None,
         pipeline: Mapping[str, Any] | None = None,
@@ -135,16 +162,36 @@ class IOManager:
                     retention = self.backup_retention
             self._create_backup(path, retention)
 
-        if ext == ".npy":
-            np.save(path, image, allow_pickle=False)
+        record_metadata = dict(metadata or {}) if metadata is not None else {}
+        image_io = self._ensure_image_io()
+        DimensionalRecord = getattr(image_io, "DimensionalImageRecord")
+        DataImageRecord = getattr(image_io, "ImageRecord")
+
+        if isinstance(image, DimensionalRecord):
+            merged_meta = dict(getattr(image, "metadata", {}))
+            merged_meta.update(record_metadata)
+            coords = getattr(image, "coordinates", {})
+            record = DimensionalRecord(
+                data=image.to_array(),
+                metadata=merged_meta,
+                dims=tuple(getattr(image, "dims", ())),
+                coordinates={axis: np.array(values, copy=True) for axis, values in coords.items()},
+            )
         else:
-            success = cv2.imwrite(str(path), image)
-            if not success:
-                raise PersistenceError(f"Failed to save image to '{path}'.")
+            array = np.asarray(image)
+            if array.ndim > 3 or (array.ndim == 3 and array.shape[2] not in (1, 3, 4)):
+                record = DimensionalRecord(data=array, metadata=record_metadata)
+            else:
+                record = DataImageRecord(data=array, metadata=record_metadata)
+
+        try:
+            image_io.save_image(record, path, self.SUPPORTED_EXPORTS[ext])
+        except Exception as exc:  # pragma: no cover - defensive logging
+            raise PersistenceError(f"Failed to save image to '{path}': {exc}") from exc
 
         metadata_path = self._write_metadata_sidecar(
             path,
-            metadata=self._ensure_mapping(metadata),
+            metadata=self._prepare_sidecar_metadata(record, metadata),
             pipeline=self._ensure_mapping(pipeline),
             settings=self._ensure_mapping(settings_snapshot),
             fmt=self.SUPPORTED_EXPORTS[ext],
@@ -157,7 +204,7 @@ class IOManager:
         *,
         read_metadata: bool = True,
         lazy: bool = False,
-    ) -> Tuple[Union[np.ndarray, TiledImageRecord], Optional[Dict[str, Any]]]:
+    ) -> Tuple[Union[np.ndarray, TiledImageRecord, _DimensionalImageRecordType], Optional[Dict[str, Any]]]:
         """Load an image array and optional metadata sidecar.
 
         When ``lazy`` is ``True`` a :class:`~core.tiled_image.TiledImageRecord`
@@ -181,6 +228,9 @@ class IOManager:
         if ext not in self.SUPPORTED_EXPORTS:
             raise PersistenceError(f"Unsupported image format '{path.suffix}'.")
 
+        image_io = self._ensure_image_io()
+        DimensionalRecord = getattr(image_io, "DimensionalImageRecord")
+
         if ext == ".npy":
             if lazy:
                 memmap = np.load(path, mmap_mode="r", allow_pickle=False)
@@ -189,11 +239,13 @@ class IOManager:
                     "dtype": str(memmap.dtype),
                     "shape": tuple(memmap.shape),
                 }
-                image: Union[np.ndarray, TiledImageRecord] = TiledImageRecord.from_npy(
-                    path, metadata=metadata, memmap=memmap
-                )
+                image = TiledImageRecord.from_npy(path, metadata=metadata, memmap=memmap)
             else:
-                image = np.load(path, allow_pickle=False)
+                record = image_io.load_image(path)
+                image = record if isinstance(record, DimensionalRecord) else record.to_array()
+        elif ext == ".npz" or ext in {".h5", ".hdf5", ".hdf"}:
+            record = image_io.load_image(path)
+            image = record if isinstance(record, DimensionalRecord) else record.to_array()
         else:
             if lazy:
                 pillow_image = Image.open(path)
@@ -222,6 +274,14 @@ class IOManager:
                         "Failed to read metadata sidecar",
                         extra={"path": str(metadata_path), "error": str(exc)},
                     )
+        image_io = self._ensure_image_io()
+        DimensionalRecord = getattr(image_io, "DimensionalImageRecord")
+
+        if isinstance(image, DimensionalRecord) and metadata_payload:
+            dims = metadata_payload.get("metadata", {}).get("dims")
+            if dims and not image.dims:
+                image.dims = tuple(dims)
+            image.metadata.update(metadata_payload.get("metadata", {}))
         return image, metadata_payload
 
     # ------------------------------------------------------------------
@@ -268,6 +328,23 @@ class IOManager:
         if isinstance(payload, Mapping):
             return dict(payload)
         raise TypeError("Metadata payloads must be mappings.")
+
+    def _prepare_sidecar_metadata(
+        self,
+        record: Any,
+        payload: Mapping[str, Any] | None,
+    ) -> Dict[str, Any]:
+        metadata = self._ensure_mapping(payload)
+        array = record.to_array()
+        metadata.setdefault("dtype", str(array.dtype))
+        metadata.setdefault("shape", tuple(int(dim) for dim in array.shape))
+        dims = getattr(record, "dims", ())
+        if dims:
+            metadata.setdefault("dims", tuple(dims))
+        return metadata
+
+    def _ensure_image_io(self) -> Any:
+        return _load_image_io_module()
 
     def _write_metadata_sidecar(
         self,
@@ -357,4 +434,17 @@ class IOManager:
                     pass
 
 
-__all__ = ["IOManager", "SaveResult", "PersistenceError", "TiledImageRecord"]
+__all__ = [
+    "IOManager",
+    "SaveResult",
+    "PersistenceError",
+    "TiledImageRecord",
+]
+
+
+def __getattr__(name: str) -> Any:  # pragma: no cover - runtime convenience
+    if name in {"DimensionalImageRecord", "ImageRecord", "TiledImageRecord"}:
+        module = _load_image_io_module()
+        if hasattr(module, name):
+            return getattr(module, name)
+    raise AttributeError(name)

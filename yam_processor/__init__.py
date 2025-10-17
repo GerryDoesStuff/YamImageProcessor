@@ -31,8 +31,14 @@ _QT_IMPORT_ERROR: Exception | None
 
 try:
     from .core.app_core import AppConfiguration, AppCore
-except ModuleNotFoundError as exc:  # pragma: no cover - optional Qt dependency
-    if exc.name not in {"PyQt5", "PySide6"}:
+except (ModuleNotFoundError, ImportError) as exc:  # pragma: no cover - optional Qt dependency
+    missing_binding = getattr(exc, "name", None)
+    message = str(exc)
+    allowed_missing = {"PyQt5", "PySide6", None}
+    if missing_binding is not None and missing_binding.startswith("Qt"):
+        allowed_missing.add(missing_binding)
+    if missing_binding not in allowed_missing and "Qt" not in message:
+        # Re-raise when the failure is unrelated to optional Qt bindings.
         raise
     _QT_IMPORT_ERROR = exc
 

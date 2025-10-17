@@ -32,6 +32,20 @@ LOGGER = logging.getLogger(__name__)
 PipelineImage = Union[NDArray, TiledPipelineImage]
 
 
+def _is_colour_array(array: np.ndarray) -> bool:
+    """Return ``True`` when ``array`` appears to represent RGB(A) data."""
+
+    if array.ndim != 3:
+        return False
+    channels = array.shape[2]
+    if channels not in (3, 4):
+        return False
+    height, width = array.shape[0], array.shape[1]
+    if max(height, width) <= channels:
+        return False
+    return True
+
+
 @dataclass
 class StepExecutionMetadata:
     """Hints controlling how a :class:`PipelineStep` should be executed.
@@ -454,6 +468,18 @@ class PipelineManager:
         # TODO(gpu): Extend this setter to perform capability checks against
         # module metadata once the GPU executor exposes backend descriptors.
         self._gpu_executor = executor
+
+    @staticmethod
+    def extract_preview(array: np.ndarray, axis: int = 0) -> np.ndarray:
+        """Return a representative 2-D slice for preview visualisation."""
+
+        if array.ndim <= 2:
+            return np.asarray(array)
+        if array.ndim == 3 and _is_colour_array(array):
+            return np.asarray(array)
+        safe_axis = max(0, min(array.ndim - 1, int(axis)))
+        index = array.shape[safe_axis] // 2
+        return np.take(array, index, axis=safe_axis)
 
     # ------------------------------------------------------------------
     # Step management helpers
