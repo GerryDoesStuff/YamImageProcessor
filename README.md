@@ -36,6 +36,33 @@ app_core.bootstrap()
 This repository currently focuses on establishing the foundation; additional processing pipelines and UI components can be buil
 t on top of the provided scaffolding.
 
+## Running the application
+
+### First-time setup
+
+1. Create and activate a Python 3.10+ virtual environment (for example, `python -m venv .venv` and `source .venv/bin/activate` on macOS/Linux, or `.venv\\Scripts\\activate` on Windows).
+2. Install the runtime dependencies with `pip install -r requirements.txt`.
+3. Optional: install the extended tooling defined in `requirements-dev.txt` if you plan to run the full quality and testing suite.
+
+### Launching the UI
+
+With the environment active, start the main application shell via:
+
+```bash
+python preprocessing22.py [--diagnostics]
+```
+
+Passing `--diagnostics` enables the additional logging and developer-oriented diagnostics that the core supports, but it is not required for normal use.
+
+On subsequent runs you can reactivate the existing virtual environment and repeat the same command without reinstalling the dependencies. If you prefer to start other entry points that ship with the project, the segmentation and feature extraction pipelines can be launched with:
+
+```bash
+python segmentation25.py
+python extraction18.py
+```
+
+Each script accepts the same optional `--diagnostics` flag when you need deeper visibility during troubleshooting.
+
 ## Version metadata
 
 The installed build number is exposed via `yam_processor.__version__` and
