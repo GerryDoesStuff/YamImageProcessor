@@ -152,3 +152,7 @@ __all__ = [
     "launch_stage_applications",
     "main",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
