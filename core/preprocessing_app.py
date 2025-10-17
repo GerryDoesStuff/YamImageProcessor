@@ -10,7 +10,9 @@ from core.app_core import AppConfiguration, AppCore
 from core.preprocessing import Config
 from core.i18n import TranslationConfig, bootstrap_translations
 from ui.preprocessing import MainWindow
+from ui.startup import StartupDialog
 from ui.theme import apply_application_theme
+from plugins.module_base import ModuleStage
 
 
 def main(app_core: Optional[AppCore] = None) -> int:
@@ -33,6 +35,10 @@ def main(app_core: Optional[AppCore] = None) -> int:
     translation_loader = bootstrap_translations(app, translation_config)
     app.setProperty("core.translation_loader", translation_loader)
     apply_application_theme(app)
+    dialog = StartupDialog(app_core, ModuleStage.PREPROCESSING)
+    if dialog.exec_() != QtWidgets.QDialog.Accepted:
+        app_core.shutdown()
+        return 0
     window = MainWindow(app_core)
     window.show()
     exit_code = app.exec_()

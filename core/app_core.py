@@ -15,7 +15,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
-from plugins.module_base import ModuleBase, ModuleStage
+from plugins.module_base import ModuleBase, ModuleMetadata, ModuleStage
 
 from .thread_controller import ThreadController
 
@@ -185,6 +185,9 @@ class AppCore:
         self._module_catalog: Dict[ModuleStage, Dict[str, ModuleBase]] = {
             stage: {} for stage in ModuleStage
         }
+        self._module_enabled: Dict[ModuleStage, Dict[str, bool]] = {
+            stage: {} for stage in ModuleStage
+        }
         self.plugins: List[object] = []
         self._log_handler: Optional[logging.Handler] = None
         self._bootstrapped = False
@@ -348,7 +351,7 @@ class AppCore:
     def get_preprocessing_pipeline_manager(self) -> PipelineManager:
         if self._preprocessing_manager is None:
             templates: Dict[str, PipelineStep] = {}
-            for module in self.iter_modules(ModuleStage.PREPROCESSING):
+            for module in self.iter_enabled_modules(ModuleStage.PREPROCESSING):
                 step = module.create_pipeline_step()
                 templates[step.name] = step
             self._preprocessing_templates = templates
@@ -694,6 +697,11 @@ class AppCore:
             return
 
         stage_modules[metadata.identifier] = module
+        enabled_map = self._module_enabled.setdefault(metadata.stage, {})
+        if metadata.identifier not in enabled_map:
+            enabled_map[metadata.identifier] = self._resolve_module_enabled_default(
+                metadata
+            )
         self.logger.info(
             "Registered module",
             extra={
@@ -702,6 +710,17 @@ class AppCore:
                 "stage": metadata.stage.value,
             },
         )
+
+    def _module_settings_key(self, stage: ModuleStage, identifier: str) -> str:
+        return f"modules/{stage.value}/{identifier}/enabled"
+
+    def _resolve_module_enabled_default(self, metadata: ModuleMetadata) -> bool:
+        if self.settings_manager is None:
+            return True
+        key = self._module_settings_key(metadata.stage, metadata.identifier)
+        if self.settings_manager.contains(key):
+            return self.settings_manager.get_bool(key, True)
+        return True
 
     def iter_modules(self, stage: ModuleStage | None = None) -> Iterator[ModuleBase]:
         """Yield registered modules, optionally filtered by ``stage``."""
@@ -712,10 +731,67 @@ class AppCore:
             return
         yield from self._module_catalog.get(stage, {}).values()
 
+    def iter_enabled_modules(self, stage: ModuleStage | None = None) -> Iterator[ModuleBase]:
+        """Yield only the modules that are currently enabled."""
+
+        if stage is None:
+            for entry_stage in ModuleStage:
+                yield from self.iter_enabled_modules(entry_stage)
+            return
+
+        modules = self._module_catalog.get(stage, {})
+        enabled_map = self._module_enabled.get(stage, {})
+        for identifier, module in modules.items():
+            if enabled_map.get(identifier, True):
+                yield module
+
     def get_modules(self, stage: ModuleStage) -> Tuple[ModuleBase, ...]:
         """Return the registered modules for ``stage``."""
 
-        return tuple(self._module_catalog.get(stage, {}).values())
+        return tuple(self.iter_enabled_modules(stage))
+
+    def enabled_modules(self, stage: ModuleStage | None = None) -> Tuple[ModuleBase, ...]:
+        """Return the currently enabled modules as a tuple."""
+
+        if stage is None:
+            return tuple(self.iter_enabled_modules())
+        return tuple(self.iter_enabled_modules(stage))
+
+    def module_enabled(self, stage: ModuleStage, identifier: str) -> bool:
+        """Return whether ``identifier`` for ``stage`` is enabled."""
+
+        return self._module_enabled.get(stage, {}).get(identifier, True)
+
+    def set_module_enabled(
+        self,
+        stage: ModuleStage,
+        identifier: str,
+        enabled: bool,
+        *,
+        persist: bool = True,
+    ) -> None:
+        """Persist the enabled flag for ``identifier`` within ``stage``."""
+
+        enabled = bool(enabled)
+        stage_modules = self._module_catalog.get(stage, {})
+        if identifier not in stage_modules:
+            return
+
+        enabled_map = self._module_enabled.setdefault(stage, {})
+        previous = enabled_map.get(identifier)
+        enabled_map[identifier] = enabled
+
+        if persist and self.settings_manager is not None:
+            self.settings_manager.set(
+                self._module_settings_key(stage, identifier), enabled
+            )
+
+        if previous == enabled:
+            return
+
+        if stage is ModuleStage.PREPROCESSING:
+            self._preprocessing_manager = None
+            self._preprocessing_templates = {}
 
     # ------------------------------------------------------------------
     # Diagnostics helpers
