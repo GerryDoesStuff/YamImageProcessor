@@ -23,6 +23,10 @@ PipelineImage = Union[NDArray, TiledPipelineImage]
 LOGGER = logging.getLogger(__name__)
 
 
+def _is_colour_array(array: np.ndarray) -> bool:
+    return array.ndim == 3 and array.shape[2] in (3, 4)
+
+
 @dataclass
 class StepExecutionMetadata:
     """Hints influencing how a :class:`PipelineStep` should be executed."""
@@ -392,7 +396,48 @@ class PipelineManager:
             )
             array_input = image if isinstance(image, NDArray) else image.to_array()
             return step.apply(array_input)
+        if isinstance(image, NDArray) and self._requires_slice_processing(image):
+            return self._apply_slice_wise(step, image)
         return step.apply(image)
+
+    @staticmethod
+    def _requires_slice_processing(array: np.ndarray) -> bool:
+        if array.ndim <= 2:
+            return False
+        if array.ndim == 3 and _is_colour_array(array):
+            return False
+        return True
+
+    def _apply_slice_wise(self, step: PipelineStep, array: np.ndarray) -> np.ndarray:
+        if array.ndim == 0:
+            return step.apply(array)  # type: ignore[return-value]
+        slices: List[np.ndarray] = []
+        for index in range(array.shape[0]):
+            plane = array[index]
+            result = step.apply(plane)
+            if isinstance(result, TiledPipelineImage):
+                result_array = result.to_array()
+            else:
+                result_array = np.asarray(result)
+            slices.append(result_array)
+        if not slices:
+            return array.copy()
+        try:
+            return np.stack(slices, axis=0)
+        except ValueError:
+            return np.array(slices, dtype=object)
+
+    @staticmethod
+    def extract_preview(array: np.ndarray, axis: int = 0) -> np.ndarray:
+        """Return a representative 2-D slice for preview visualisation."""
+
+        if array.ndim <= 2:
+            return np.asarray(array)
+        if array.ndim == 3 and _is_colour_array(array):
+            return np.asarray(array)
+        axis = max(0, min(array.ndim - 1, axis))
+        index = array.shape[axis] // 2
+        return np.take(array, index, axis=axis)
 
     # ------------------------------------------------------------------
     # History support

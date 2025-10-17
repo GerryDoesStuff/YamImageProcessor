@@ -10,7 +10,13 @@ import numpy as np
 
 from PyQt5 import QtWidgets  # type: ignore
 
-from yam_processor.data import ImageRecord, TiledImageRecord, load_image, save_image
+from yam_processor.data import (
+    DimensionalImageRecord,
+    ImageRecord,
+    TiledImageRecord,
+    load_image,
+    save_image,
+)
 from yam_processor.processing import PipelineManager, PipelineStep
 
 if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
@@ -50,7 +56,7 @@ class PipelineController:
     # ------------------------------------------------------------------
     def load_image_record(
         self, path: str | Path, *, record_history: bool = False
-    ) -> ImageRecord | TiledImageRecord:
+    ) -> ImageRecord | TiledImageRecord | DimensionalImageRecord:
         """Load an image file into an :class:`ImageRecord`.
 
         Parameters
@@ -69,7 +75,7 @@ class PipelineController:
 
     def save_image_record(
         self,
-        record: ImageRecord | TiledImageRecord,
+        record: ImageRecord | TiledImageRecord | DimensionalImageRecord,
         path: str | Path,
         *,
         format: Optional[str] = None,

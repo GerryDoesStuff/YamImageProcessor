@@ -105,7 +105,10 @@ class PipelineCacheTileUpdate:
     from_cache: bool = False
 
 
-CacheValue = Union[NDArray, "TileCacheEntry"]
+CacheValue = Union[NDArray, "TileCacheEntry", "SliceCacheEntry"]
+
+
+_SLICE_CACHE_THRESHOLD = int(os.environ.get("YAM_PIPELINE_SLICE_CACHE", 128 * 1024 * 1024))
 
 
 @dataclass
@@ -155,6 +158,37 @@ class TileCacheEntry:
             tiles=[(box, np.array(array, copy=True))],
             tile_size=(int(width), int(height)),
         )
+
+
+@dataclass
+class SliceCacheEntry:
+    """Container storing per-slice outputs for high-dimensional arrays."""
+
+    axis: int
+    shape: Tuple[int, ...]
+    dtype: np.dtype
+    slices: Dict[int, NDArray]
+
+    def assemble(self) -> NDArray:
+        result = np.zeros(self.shape, dtype=self.dtype)
+        for index, slice_array in self.slices.items():
+            selector = [slice(None)] * len(self.shape)
+            selector[self.axis] = index
+            result[tuple(selector)] = slice_array
+        return result
+
+    def iter_slices(self) -> Iterator[Tuple[int, NDArray]]:
+        for index in sorted(self.slices):
+            yield index, np.array(self.slices[index], copy=True)
+
+    @classmethod
+    def from_array(cls, array: NDArray, axis: int = 0) -> "SliceCacheEntry":
+        slices: Dict[int, NDArray] = {}
+        for index in range(array.shape[axis]):
+            selector = [slice(None)] * array.ndim
+            selector[axis] = index
+            slices[index] = np.array(array[tuple(selector)], copy=True)
+        return cls(axis=axis, shape=tuple(array.shape), dtype=np.dtype(array.dtype), slices=slices)
 
 class PipelineCache:
     """Store step outputs keyed by source image and pipeline configuration."""
@@ -231,7 +265,7 @@ class PipelineCache:
 
         with self._lock:
             cache = self._cache.setdefault(source_id, {})
-            stored = np.array(array, copy=True)
+            stored = self._create_cache_value(array)
             cache[source_id] = stored
             metadata = {
                 "version": 1,
@@ -348,13 +382,15 @@ class PipelineCache:
                 with self._lock:
                     stored = np.array(result, copy=True)
                     cache[record.signature] = stored
+                    stored = self._create_cache_value(result)
+                    cache[record.signature] = stored
                     self._write_disk_cache(source_id, record.signature, stored)
-            if progress is not None:
-                progress(int(((index + 1) / total_steps) * 100))
+        if progress is not None:
+            progress(int(((index + 1) / total_steps) * 100))
 
         if not records:
             with self._lock:
-                stored = np.array(result, copy=True)
+                stored = self._create_cache_value(result)
                 cache[final_signature] = stored
                 self._write_disk_cache(source_id, final_signature, stored)
 
@@ -540,7 +576,14 @@ class PipelineCache:
     def _coerce_cache_to_array(self, value: CacheValue) -> NDArray:
         if isinstance(value, TileCacheEntry):
             return value.assemble()
+        if isinstance(value, SliceCacheEntry):
+            return value.assemble()
         return value
+
+    def _create_cache_value(self, array: NDArray) -> CacheValue:
+        if array.ndim > 2 and array.nbytes >= max(1, _SLICE_CACHE_THRESHOLD):
+            return SliceCacheEntry.from_array(array)
+        return np.array(array, copy=True)
 
     def _get_cached_value(
         self,
@@ -679,6 +722,35 @@ class PipelineCache:
         directory = self._cache_directory
         if directory is None:
             return
+        if isinstance(value, SliceCacheEntry):
+            path = directory / f"{source_id}_{signature}.npz"
+            tmp_path = path.with_suffix(".npz.tmp")
+            metadata = {
+                "type": "slices",
+                "axis": int(value.axis),
+                "shape": list(value.shape),
+                "dtype": str(value.dtype),
+                "indices": list(sorted(value.slices)),
+            }
+            try:
+                arrays: Dict[str, NDArray] = {
+                    f"slice_{index}": np.array(slice_array, copy=True)
+                    for index, slice_array in value.iter_slices()
+                }
+                arrays["metadata"] = np.array(json.dumps(metadata))
+                with tmp_path.open("wb") as handle:
+                    np.savez(handle, **arrays)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_path, path)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self._logger.debug(
+                    "Failed to persist slice pipeline cache entry",
+                    extra={"path": str(path), "error": str(exc)},
+                )
+                with contextlib.suppress(FileNotFoundError):
+                    tmp_path.unlink()
+            return
         if isinstance(value, TileCacheEntry):
             path = directory / f"{source_id}_{signature}.npz"
             tmp_path = path.with_suffix(".npz.tmp")
@@ -755,20 +827,31 @@ class PipelineCache:
                 else:
                     metadata_text = str(metadata_raw)
                 metadata = json.loads(str(metadata_text))
-                if metadata.get("type") != "tiles":
-                    return None
-                boxes = [tuple(map(int, box)) for box in metadata.get("boxes", [])]
-                tiles: List[Tuple[TileBox, np.ndarray]] = []
-                for index, box in enumerate(boxes):
-                    tile_key = f"tile_{index}"
-                    if tile_key not in data:
-                        continue
-                    tiles.append((box, np.array(data[tile_key])))
-                dtype = np.dtype(metadata.get("dtype", "float32"))
-                shape = tuple(int(value) for value in metadata.get("shape", []))
-                tile_size_meta = metadata.get("tile_size")
-                tile_size = tuple(int(v) for v in tile_size_meta) if tile_size_meta else None
-                return TileCacheEntry.from_tiles(shape, dtype, tiles, tile_size=tile_size)
+                metadata_type = metadata.get("type")
+                if metadata_type == "tiles":
+                    boxes = [tuple(map(int, box)) for box in metadata.get("boxes", [])]
+                    tiles: List[Tuple[TileBox, np.ndarray]] = []
+                    for index, box in enumerate(boxes):
+                        tile_key = f"tile_{index}"
+                        if tile_key not in data:
+                            continue
+                        tiles.append((box, np.array(data[tile_key])))
+                    dtype = np.dtype(metadata.get("dtype", "float32"))
+                    shape = tuple(int(value) for value in metadata.get("shape", []))
+                    tile_size_meta = metadata.get("tile_size")
+                    tile_size = tuple(int(v) for v in tile_size_meta) if tile_size_meta else None
+                    return TileCacheEntry.from_tiles(shape, dtype, tiles, tile_size=tile_size)
+                if metadata_type == "slices":
+                    indices = [int(idx) for idx in metadata.get("indices", [])]
+                    dtype = np.dtype(metadata.get("dtype", "float32"))
+                    shape = tuple(int(value) for value in metadata.get("shape", []))
+                    axis = int(metadata.get("axis", 0))
+                    slices: Dict[int, NDArray] = {}
+                    for index in indices:
+                        key = f"slice_{index}"
+                        if key in data:
+                            slices[index] = np.array(data[key])
+                    return SliceCacheEntry(axis=axis, shape=shape, dtype=dtype, slices=slices)
         except Exception as exc:  # pragma: no cover - defensive logging
             self._logger.debug(
                 "Failed to load tiled pipeline cache entry",
@@ -799,5 +882,6 @@ __all__ = [
     "PipelineCacheTileUpdate",
     "StepRecord",
     "TileCacheEntry",
+    "SliceCacheEntry",
 ]
 

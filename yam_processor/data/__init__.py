@@ -1,6 +1,7 @@
 """Data layer utilities for image file input and output."""
 
-from .image_io import ImageRecord, TiledImageRecord, load_image, save_image
+from . import image_io
+from .image_io import DimensionalImageRecord, ImageRecord, TiledImageRecord, load_image, save_image
 from .paths import (
     ROOT_PLACEHOLDER,
     PathValidationError,
@@ -14,6 +15,7 @@ from .paths import (
 __all__ = [
     "ImageRecord",
     "TiledImageRecord",
+    "DimensionalImageRecord",
     "ROOT_PLACEHOLDER",
     "PathValidationError",
     "allowed_roots",
@@ -23,4 +25,5 @@ __all__ = [
     "load_image",
     "sanitize_user_path",
     "save_image",
+    "image_io",
 ]

@@ -203,6 +203,25 @@ def test_pipeline_materialises_tiled_records_when_step_lacks_support(
     np.testing.assert_allclose(result, array + 1.0)
 
 
+def test_pipeline_operates_on_nd_arrays() -> None:
+    volume = np.stack([
+        np.arange(9, dtype=np.float32).reshape(3, 3) + layer for layer in range(4)
+    ])
+    manager = PipelineManager(
+        [
+            PipelineStep("add", _add_value, params={"value": 2.0}),
+            PipelineStep("multiply", _multiply_value, params={"factor": 0.5}),
+        ]
+    )
+
+    result = manager.apply(volume)
+    expected = (volume + 2.0) * 0.5
+
+    assert isinstance(result, np.ndarray)
+    assert result.shape == volume.shape
+    assert np.allclose(result, expected)
+
+
 def test_pipeline_preserves_tiled_records_for_supported_steps(tiled_pipeline_image) -> None:
     record, array = tiled_pipeline_image
     manager = PipelineManager(
@@ -230,3 +249,10 @@ def test_pipeline_streams_tiles_when_steps_require_dense_input() -> None:
 
     assert isinstance(result, np.ndarray)
     np.testing.assert_allclose(result, (array + 1.0) * 2.0)
+
+
+def test_extract_preview_returns_central_slice() -> None:
+    volume = np.arange(2 * 3 * 4).reshape(2, 3, 4)
+    preview = PipelineManager.extract_preview(volume)
+    assert preview.shape == (3, 4)
+    np.testing.assert_array_equal(preview, volume[1])

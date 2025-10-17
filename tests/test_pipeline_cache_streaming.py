@@ -5,7 +5,8 @@ from typing import Iterator, Tuple
 
 import numpy as np
 
-from processing.pipeline_cache import PipelineCache, TileCacheEntry
+import processing.pipeline_cache as pipeline_cache
+from processing.pipeline_cache import PipelineCache, SliceCacheEntry, TileCacheEntry
 from processing.pipeline_manager import PipelineStep
 from processing.tiled_records import TiledPipelineImage
 
@@ -76,3 +77,22 @@ def test_pipeline_cache_streams_tiles(tmp_path: Path) -> None:
 
     second = cache.compute(source_id, tiled, steps)
     np.testing.assert_allclose(second.image, expected)
+
+
+def test_pipeline_cache_uses_slice_cache_for_nd_arrays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pipeline_cache, "_SLICE_CACHE_THRESHOLD", 0)
+    cache = PipelineCache(cache_directory=tmp_path)
+    volume = np.random.rand(3, 4, 5).astype(np.float32)
+    source_id = cache.register_source(volume)
+    steps = (PipelineStep("noop", lambda image: image),)
+
+    result = cache.compute(source_id, volume, steps)
+
+    with cache._lock:  # type: ignore[attr-defined]
+        entry = cache._cache[source_id][result.final_signature]
+    assert isinstance(entry, SliceCacheEntry)
+    cached = cache.get_cached_image(source_id, result.final_signature)
+    assert cached is not None
+    np.testing.assert_allclose(cached, volume)

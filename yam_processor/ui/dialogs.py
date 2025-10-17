@@ -5,10 +5,12 @@ from __future__ import annotations
 import traceback
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets  # type: ignore
+
+from yam_processor.data import DimensionalImageRecord
 
 from .error_dialog import ErrorDialog
 from .tooltips import format_parameter_tooltip
@@ -188,25 +190,60 @@ class PreviewWidget(QtWidgets.QWidget):
         self._active_record: Optional[TiledImageRecord] = None
         self._current_level_index: Optional[int] = None
         self._auto_fit_enabled = True
+        self._nd_array: Optional[np.ndarray] = None
+        self._nd_dims: Tuple[str, ...] = ()
+        self._nd_axis = 0
+        self._updating_controls = False
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._view)
+        controls = QtWidgets.QWidget(self)
+        controls_layout = QtWidgets.QHBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(6)
+        axis_label = QtWidgets.QLabel(self.tr("Axis:"), controls)
+        self._axis_combo = QtWidgets.QComboBox(controls)
+        self._slice_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, controls)
+        self._slice_slider.setMinimum(0)
+        self._slice_slider.setMaximum(0)
+        self._slice_spin = QtWidgets.QSpinBox(controls)
+        self._slice_spin.setMinimum(0)
+        self._slice_spin.setMaximum(0)
+        controls_layout.addWidget(axis_label)
+        controls_layout.addWidget(self._axis_combo)
+        controls_layout.addWidget(self._slice_slider, 1)
+        controls_layout.addWidget(self._slice_spin)
+        layout.addWidget(controls)
+        controls.hide()
+        self._slice_controls = controls
+        self._axis_combo.currentIndexChanged.connect(self._on_axis_changed)
+        self._slice_slider.valueChanged.connect(self._on_slice_index_changed)
+        self._slice_spin.valueChanged.connect(self._on_slice_index_changed)
         self._view.interactionStarted.connect(self._disable_auto_fit)
         self._view.resetRequested.connect(self._reset_view)
 
-    def set_image(self, record: Optional[TiledImageRecord]) -> None:
+    def set_image(
+        self, record: Optional[TiledImageRecord | DimensionalImageRecord]
+    ) -> None:
         """Render ``record`` or clear the view if ``None`` is supplied."""
 
         self._scene.clear()
         self._current_pixmap = None
         self._image_buffer = None
-        self._active_record = record
         self._pending_levels = []
         self._current_level_index = None
         self._request_id += 1
         self._auto_fit_enabled = True
         self._view.resetTransform()
+        self._nd_array = None
+        self._slice_controls.hide()
+        if isinstance(record, DimensionalImageRecord):
+            self._active_record = None
+            self.update_array(record.to_array(), dims=record.dims)
+            return
+
+        self._active_record = record
         request_id = self._request_id
         if record is None:
             return
@@ -248,24 +285,85 @@ class PreviewWidget(QtWidgets.QWidget):
             return
         if not isinstance(image, np.ndarray):
             return
-        qimage, buffer = self._to_qimage(image)
-        self._image_buffer = buffer
-        pixmap = QtGui.QPixmap.fromImage(qimage)
-        if self._current_pixmap is None:
-            self._current_pixmap = self._scene.addPixmap(pixmap)
-            self._fit_view()
-        else:
-            self._current_pixmap.setPixmap(pixmap)
+        self._render_concrete_array(image)
         self._current_level_index = level_index
         self._start_next_level(request_id)
 
-    def update_array(self, image: np.ndarray) -> None:
+    def update_array(self, image: np.ndarray, dims: Optional[Sequence[str]] = None) -> None:
         """Update the displayed pixmap using a precomputed ``numpy`` array."""
 
         self._request_id += 1
         self._pending_levels = []
         self._current_level_index = None
-        qimage, buffer = self._to_qimage(image)
+        array = np.asarray(image)
+        if self._should_use_nd_controls(array):
+            if dims:
+                self._nd_dims = tuple(str(dim) for dim in dims)
+            else:
+                self._nd_dims = tuple(f"Axis {index}" for index in range(array.ndim))
+            self._nd_array = array
+            self._configure_slice_controls()
+            self._render_nd_slice()
+            return
+
+        self._clear_nd_state()
+        self._render_concrete_array(array)
+
+    def _clear_nd_state(self) -> None:
+        self._nd_array = None
+        self._nd_dims = ()
+        self._slice_controls.hide()
+
+    def _should_use_nd_controls(self, array: np.ndarray) -> bool:
+        if array.ndim <= 2:
+            return False
+        if array.ndim == 3 and array.shape[2] in (1, 3, 4):
+            return False
+        return True
+
+    def _configure_slice_controls(self) -> None:
+        if self._nd_array is None:
+            self._slice_controls.hide()
+            return
+        axes: List[Tuple[int, str, int]] = []
+        dims = self._nd_dims or tuple(f"Axis {index}" for index in range(self._nd_array.ndim))
+        for index, size in enumerate(self._nd_array.shape):
+            if size <= 1:
+                continue
+            if (
+                self._nd_array.ndim == 3
+                and index == self._nd_array.ndim - 1
+                and self._nd_array.shape[index] in (1, 3, 4)
+            ):
+                continue
+            axes.append((index, dims[index], size))
+        if not axes:
+            axes.append((0, dims[0], self._nd_array.shape[0]))
+        self._updating_controls = True
+        self._axis_combo.clear()
+        for axis_index, name, _size in axes:
+            self._axis_combo.addItem(f"{name} ({axis_index})", axis_index)
+        valid_axes = [axis for axis, _name, _size in axes]
+        if self._nd_axis not in valid_axes:
+            self._nd_axis = valid_axes[0]
+        self._axis_combo.setCurrentIndex(valid_axes.index(self._nd_axis))
+        self._update_slice_range()
+        self._slice_controls.show()
+        self._updating_controls = False
+
+    def _update_slice_range(self) -> None:
+        if self._nd_array is None:
+            return
+        size = self._nd_array.shape[self._nd_axis]
+        maximum = max(0, size - 1)
+        self._slice_slider.setRange(0, maximum)
+        self._slice_spin.setRange(0, maximum)
+        current = min(self._slice_slider.value(), maximum)
+        self._slice_slider.setValue(current)
+        self._slice_spin.setValue(current)
+
+    def _render_concrete_array(self, array: np.ndarray) -> None:
+        qimage, buffer = self._to_qimage(array)
         self._image_buffer = buffer
         pixmap = QtGui.QPixmap.fromImage(qimage)
         if self._current_pixmap is None:
@@ -274,6 +372,44 @@ class PreviewWidget(QtWidgets.QWidget):
                 self._fit_view()
         else:
             self._current_pixmap.setPixmap(pixmap)
+
+    def _render_nd_slice(self) -> None:
+        if self._nd_array is None:
+            return
+        axis = self._nd_axis
+        index = self._slice_slider.value()
+        selector = [slice(None)] * self._nd_array.ndim
+        selector[axis] = index
+        slice_array = self._nd_array[tuple(selector)]
+        if slice_array.ndim == 0:
+            slice_array = np.array([[slice_array]])
+        elif slice_array.ndim == 1:
+            slice_array = np.expand_dims(slice_array, axis=0)
+        self._render_concrete_array(np.asarray(slice_array))
+
+    def _on_axis_changed(self, index: int) -> None:
+        if self._updating_controls or self._nd_array is None:
+            return
+        data = self._axis_combo.itemData(index)
+        if data is None:
+            return
+        self._nd_axis = int(data)
+        self._updating_controls = True
+        self._update_slice_range()
+        self._updating_controls = False
+        self._render_nd_slice()
+
+    def _on_slice_index_changed(self, value: int) -> None:
+        if self._updating_controls or self._nd_array is None:
+            return
+        sender = self.sender()
+        self._updating_controls = True
+        if sender is self._slice_slider:
+            self._slice_spin.setValue(value)
+        else:
+            self._slice_slider.setValue(value)
+        self._updating_controls = False
+        self._render_nd_slice()
 
     @QtCore.pyqtSlot(int, Exception, str, int)
     def _handle_level_failed(

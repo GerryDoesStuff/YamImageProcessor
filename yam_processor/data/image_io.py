@@ -23,17 +23,25 @@ reloading.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional, Tuple
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageSequence
+
+try:  # pragma: no cover - optional dependency in minimal environments
+    import h5py
+except Exception:  # pragma: no cover - gracefully handle missing bindings
+    h5py = None
 
 from .paths import sanitize_user_path
 
 
 _SUPPORTED_RASTER_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+_SUPPORTED_VOLUME_SUFFIXES = {".tif", ".tiff", ".h5", ".hdf5", ".hdf"}
+_SUPPORTED_ARRAY_SUFFIXES = {".npy", ".npz"}
 _DEFAULT_LAZY_PIXEL_THRESHOLD = 64_000_000  # 64 MP ~= 256 MB @ 32-bit RGBA
 _LAZY_PIXEL_THRESHOLD = int(
     os.environ.get("YAM_LAZY_PIXEL_THRESHOLD", _DEFAULT_LAZY_PIXEL_THRESHOLD)
@@ -134,6 +142,42 @@ class TiledImageRecord:
             yield box, self.read_region(box)
 
 
+@dataclass(slots=True)
+class DimensionalImageRecord:
+    """Container describing an ``n``-dimensional array with axis metadata."""
+
+    data: np.ndarray
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    dims: Tuple[str, ...] = field(default_factory=tuple)
+    coordinates: Dict[str, np.ndarray] = field(default_factory=dict)
+
+    def to_array(self) -> np.ndarray:
+        return np.asarray(self.data)
+
+    def axis_size(self, axis: int | str) -> int:
+        axis_index = self._resolve_axis(axis)
+        return int(self.to_array().shape[axis_index])
+
+    def slice(self, axis: int | str, index: int) -> np.ndarray:
+        axis_index = self._resolve_axis(axis)
+        slicer = [slice(None)] * self.to_array().ndim
+        slicer[axis_index] = int(index)
+        return self.to_array()[tuple(slicer)]
+
+    def _resolve_axis(self, axis: int | str) -> int:
+        if isinstance(axis, str):
+            dims = self._dims()
+            if axis not in dims:
+                raise KeyError(f"Unknown axis '{axis}'")
+            return dims.index(axis)
+        return int(axis)
+
+    def _dims(self) -> Tuple[str, ...]:
+        if not self.dims:
+            self.dims = _infer_dimensions(self.to_array())
+        return self.dims
+
+
 def _normalise_path(path: Path | str) -> Path:
     resolved = sanitize_user_path(path, must_exist=True, allow_directory=False)
     if not resolved.is_file():
@@ -141,7 +185,7 @@ def _normalise_path(path: Path | str) -> Path:
     return resolved
 
 
-def load_image(path: Path | str) -> ImageRecord | TiledImageRecord:
+def load_image(path: Path | str) -> ImageRecord | TiledImageRecord | DimensionalImageRecord:
     """Load an image or ``.npy`` array from ``path``.
 
     Images that exceed the configured lazy-loading threshold are returned as a
@@ -152,16 +196,17 @@ def load_image(path: Path | str) -> ImageRecord | TiledImageRecord:
     resolved = _normalise_path(path)
     suffix = resolved.suffix.lower()
 
-    if suffix == ".npy":
-        array = np.load(resolved, allow_pickle=False)
-        metadata: Dict[str, Any] = {
-            "format": "NPY",
-            "dtype": str(array.dtype),
-            "shape": array.shape,
-        }
+    if suffix in _SUPPORTED_ARRAY_SUFFIXES:
+        array, metadata = _load_numpy(resolved)
+        if array.ndim > 3 and not _is_colour_stack(array):
+            dims = tuple(metadata.get("dims", _infer_dimensions(array)))
+            metadata["dims"] = dims
+            return DimensionalImageRecord(data=array, metadata=metadata, dims=dims)
         return ImageRecord(data=array, metadata=metadata)
 
     if suffix not in _SUPPORTED_RASTER_SUFFIXES:
+        if suffix in {".h5", ".hdf5", ".hdf"}:
+            return _load_hdf5(resolved)
         raise ValueError(f"Unsupported image format: {resolved.suffix}")
 
     img = Image.open(resolved)
@@ -178,6 +223,15 @@ def load_image(path: Path | str) -> ImageRecord | TiledImageRecord:
     if icc_profile:
         metadata["icc_profile"] = icc_profile
 
+    if suffix in _SUPPORTED_VOLUME_SUFFIXES and getattr(img, "n_frames", 1) > 1:
+        frames = [_image_to_array(frame.copy()) for frame in ImageSequence.Iterator(img)]
+        array = np.stack(frames, axis=0)
+        dims = _infer_dimensions(array, prefer_volume=True)
+        metadata["dims"] = dims
+        metadata["frames"] = len(frames)
+        img.close()
+        return DimensionalImageRecord(data=array, metadata=metadata, dims=dims)
+
     if _should_stream_image(img):
         return TiledImageRecord(image=img, metadata=metadata)
 
@@ -185,6 +239,10 @@ def load_image(path: Path | str) -> ImageRecord | TiledImageRecord:
         array = _image_to_array(img)
     finally:
         img.close()
+    if array.ndim > 3 and not _is_colour_stack(array):
+        dims = _infer_dimensions(array)
+        metadata["dims"] = dims
+        return DimensionalImageRecord(data=array, metadata=metadata, dims=dims)
     return ImageRecord(data=array, metadata=metadata)
 
 
@@ -211,7 +269,9 @@ def _prepare_save_metadata(metadata: Mapping[str, Any] | None) -> Dict[str, Any]
 
 
 def save_image(
-    record: ImageRecord | TiledImageRecord, path: Path | str, format: Optional[str] = None
+    record: ImageRecord | TiledImageRecord | DimensionalImageRecord,
+    path: Path | str,
+    format: Optional[str] = None,
 ) -> None:
     """Persist ``record`` to ``path`` using ``format`` if supplied."""
 
@@ -219,14 +279,16 @@ def save_image(
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     fmt = (format or destination.suffix.lstrip(".")).upper()
-    if fmt == "NPY":
-        np.save(destination, record.to_array(), allow_pickle=False)
-        metadata = record.metadata
-        if isinstance(metadata, MutableMapping):
-            metadata.setdefault("format", "NPY")
-            array = record.to_array()
-            metadata.setdefault("dtype", str(array.dtype))
-            metadata.setdefault("shape", array.shape)
+    if fmt in {"NPY", "NPZ"}:
+        _save_numpy(record, destination, fmt)
+        return
+
+    if fmt in {"H5", "HDF5"}:
+        _save_hdf5(record, destination)
+        return
+
+    if fmt == "TIFF" and isinstance(record, DimensionalImageRecord):
+        _save_tiff_stack(record, destination)
         return
 
     # For raster formats defer to Pillow for encoding.
@@ -255,6 +317,144 @@ def save_image(
         record.metadata.setdefault("format", image.format or fmt)
         record.metadata.setdefault("mode", image.mode)
         record.metadata.setdefault("size", image.size)
+
+
+def _load_numpy(path: Path) -> Tuple[np.ndarray, Dict[str, Any]]:
+    if path.suffix.lower() == ".npz":
+        with np.load(path, allow_pickle=False) as archive:
+            if "arr_0" not in archive:
+                raise ValueError(".npz archives must contain an 'arr_0' dataset")
+            array = archive["arr_0"]
+            metadata_raw = archive.get("metadata")
+            if metadata_raw is None:
+                metadata = {}
+            else:
+                try:
+                    metadata = json.loads(metadata_raw.item())  # type: ignore[arg-type]
+                except Exception as exc:  # pragma: no cover - defensive
+                    raise ValueError("Failed to decode metadata from .npz archive") from exc
+    else:
+        array = np.load(path, allow_pickle=False)
+        metadata = {}
+    metadata.setdefault("format", "NPY")
+    metadata.setdefault("dtype", str(array.dtype))
+    metadata.setdefault("shape", array.shape)
+    return array, metadata
+
+
+def _save_numpy(
+    record: ImageRecord | TiledImageRecord | DimensionalImageRecord, path: Path, fmt: str
+) -> None:
+    array = np.asarray(record.to_array())
+    metadata = dict(record.metadata) if isinstance(record.metadata, MutableMapping) else {}
+    metadata.setdefault("format", fmt)
+    metadata.setdefault("dtype", str(array.dtype))
+    metadata.setdefault("shape", array.shape)
+    if isinstance(record, DimensionalImageRecord) and record.dims:
+        metadata.setdefault("dims", tuple(record.dims))
+    if fmt == "NPZ":
+        payload: Dict[str, np.ndarray] = {"arr_0": array}
+        payload["metadata"] = np.array(json.dumps(metadata))
+        np.savez(path, **payload)
+    else:
+        np.save(path, array, allow_pickle=False)
+
+
+def _load_hdf5(path: Path) -> DimensionalImageRecord:
+    if h5py is None:
+        raise RuntimeError("h5py is required to load HDF5 files but is not installed")
+    with h5py.File(path, "r") as handle:  # type: ignore[call-arg]
+        dataset = _select_first_dataset(handle)
+        array = dataset[()]
+        metadata = {
+            "format": "HDF5",
+            "dtype": str(array.dtype),
+            "shape": array.shape,
+            "path": dataset.name,
+        }
+        dims_attr = dataset.attrs.get("dims")
+        if isinstance(dims_attr, (list, tuple)):
+            dims = tuple(str(dim) for dim in dims_attr)
+        else:
+            dims = _infer_dimensions(array)
+        metadata["dims"] = dims
+        coordinates: Dict[str, np.ndarray] = {}
+        for key, value in dataset.attrs.items():
+            if key.startswith("coord_"):
+                axis = key.split("coord_", 1)[1]
+                coordinates[axis] = np.array(value)
+    return DimensionalImageRecord(data=array, metadata=metadata, dims=dims, coordinates=coordinates)
+
+
+def _save_hdf5(
+    record: ImageRecord | TiledImageRecord | DimensionalImageRecord, path: Path
+) -> None:
+    if h5py is None:
+        raise RuntimeError("h5py is required to save HDF5 files but is not installed")
+    array = np.asarray(record.to_array())
+    dims = _infer_record_dims(record, array)
+    with h5py.File(path, "w") as handle:  # type: ignore[call-arg]
+        dataset = handle.create_dataset("data", data=array)
+        dataset.attrs["dims"] = list(dims)
+        if isinstance(record, DimensionalImageRecord):
+            for axis, values in record.coordinates.items():
+                dataset.attrs[f"coord_{axis}"] = np.asarray(values)
+
+
+def _save_tiff_stack(record: DimensionalImageRecord, path: Path) -> None:
+    array = np.asarray(record.to_array())
+    if array.ndim < 3:
+        raise ValueError("TIFF stacks require arrays with three or more dimensions")
+    frames = []
+    for index in range(array.shape[0]):
+        frame = array[index]
+        if frame.ndim == 2:
+            frames.append(Image.fromarray(frame))
+        elif frame.ndim == 3 and frame.shape[2] in (1, 3, 4):
+            frames.append(Image.fromarray(frame))
+        else:
+            raise ValueError("Cannot serialise multi-channel slice with unsupported shape")
+    first, *rest = frames
+    first.save(path, save_all=True, append_images=rest)
+
+
+def _select_first_dataset(handle: "h5py.File"):
+    queue: list[Any] = [handle]
+    while queue:
+        current = queue.pop(0)
+        if isinstance(current, h5py.Dataset):
+            return current
+        for value in current.values():
+            if isinstance(value, (h5py.Dataset, h5py.Group)):
+                queue.append(value)
+    raise ValueError("No datasets found in HDF5 file")
+
+
+def _infer_record_dims(
+    record: ImageRecord | TiledImageRecord | DimensionalImageRecord, array: np.ndarray
+) -> Tuple[str, ...]:
+    if isinstance(record, DimensionalImageRecord) and record.dims:
+        return tuple(record.dims)
+    metadata = record.metadata if isinstance(record.metadata, Mapping) else {}
+    dims = metadata.get("dims")
+    if isinstance(dims, (list, tuple)):
+        return tuple(str(dim) for dim in dims)
+    return _infer_dimensions(array)
+
+
+def _infer_dimensions(array: np.ndarray, *, prefer_volume: bool = False) -> Tuple[str, ...]:
+    if array.ndim == 2:
+        return ("y", "x")
+    if array.ndim == 3:
+        if _is_colour_stack(array) and not prefer_volume:
+            return ("y", "x", "channel")
+        return ("z", "y", "x")
+    dims = [f"dim{i}" for i in range(array.ndim - 2)] + ["y", "x"]
+    return tuple(dims)
+
+
+def _is_colour_stack(array: np.ndarray) -> bool:
+    return array.ndim == 3 and array.shape[2] in (3, 4)
 
 
 def _image_to_array(image: Image.Image) -> np.ndarray:
