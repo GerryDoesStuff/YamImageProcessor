@@ -3,19 +3,17 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Mapping, Sequence
 
 from PyQt5 import QtCore, QtWidgets
 
 from core.app_core import AppConfiguration, AppCore
 from core.i18n import TranslationConfig, bootstrap_translations
-from core.extraction import Config as ExtractionConfig
-from core.preprocessing import Config as PreprocessingConfig
-from core.segmentation import Config as SegmentationConfig
 from plugins.module_base import ModuleStage
 from ui.startup import StartupDialog, StartupModuleOption
 from ui.theme import apply_application_theme
+from ui.unified import UnifiedMainWindow
 
 
 @dataclass(frozen=True)
@@ -24,9 +22,9 @@ class StageApplicationSpec:
 
     stage: ModuleStage
     title: str
-    configuration_factory: Callable[[], AppConfiguration] = field(repr=False)
-    window_factory: Callable[[AppCore], QtWidgets.QMainWindow] = field(repr=False)
+    pane_factory: Callable[[AppCore], QtWidgets.QWidget]
     description: str = ""
+    enabled_by_default: bool = True
 
 
 def default_stage_specifications() -> list[StageApplicationSpec]:
@@ -37,64 +35,69 @@ def default_stage_specifications() -> list[StageApplicationSpec]:
             stage=ModuleStage.PREPROCESSING,
             title="Preprocessing",
             description="Prepare imagery before segmentation or feature extraction.",
-            configuration_factory=lambda: AppConfiguration(
-                organization=PreprocessingConfig.SETTINGS_ORG,
-                application=PreprocessingConfig.SETTINGS_APP,
-            ),
-            window_factory=_create_preprocessing_window,
+            pane_factory=_create_preprocessing_pane,
+            enabled_by_default=True,
         ),
         StageApplicationSpec(
             stage=ModuleStage.SEGMENTATION,
             title="Segmentation",
             description="Isolate meaningful regions from the prepared imagery.",
-            configuration_factory=lambda: AppConfiguration(
-                organization=SegmentationConfig.SETTINGS_ORG,
-                application=SegmentationConfig.SETTINGS_APP,
-            ),
-            window_factory=_create_segmentation_window,
+            pane_factory=_create_segmentation_pane,
+            enabled_by_default=True,
         ),
         StageApplicationSpec(
             stage=ModuleStage.ANALYSIS,
             title="Feature Extraction",
             description="Extract quantitative descriptors from segmented data.",
-            configuration_factory=lambda: AppConfiguration(
-                organization=ExtractionConfig.SETTINGS_ORG,
-                application=ExtractionConfig.SETTINGS_APP,
-            ),
-            window_factory=_create_extraction_window,
+            pane_factory=_create_extraction_pane,
+            enabled_by_default=False,
         ),
     ]
 
 
-def _create_preprocessing_window(core: AppCore) -> QtWidgets.QMainWindow:
-    """Import and construct the preprocessing main window lazily."""
+def _create_preprocessing_pane(core: AppCore) -> QtWidgets.QWidget:
+    """Import and construct the preprocessing pane lazily."""
+
+    from PyQt5 import QtCore as _QtCore
 
     from ui.preprocessing import MainWindow as PreprocessingMainWindow
 
-    return PreprocessingMainWindow(core)
+    window = PreprocessingMainWindow(core)
+    window.setWindowFlag(_QtCore.Qt.Widget, True)
+    return window
 
 
-def _create_segmentation_window(core: AppCore) -> QtWidgets.QMainWindow:
-    """Import and construct the segmentation main window lazily."""
+def _create_segmentation_pane(core: AppCore) -> QtWidgets.QWidget:
+    """Import and construct the segmentation pane lazily."""
+
+    from PyQt5 import QtCore as _QtCore
 
     from ui.segmentation import MainWindow as SegmentationMainWindow
 
-    return SegmentationMainWindow(core)
+    window = SegmentationMainWindow(core)
+    window.setWindowFlag(_QtCore.Qt.Widget, True)
+    return window
 
 
-def _create_extraction_window(core: AppCore) -> QtWidgets.QMainWindow:
-    """Import and construct the extraction main window lazily."""
+def _create_extraction_pane(core: AppCore) -> QtWidgets.QWidget:
+    """Import and construct the extraction pane lazily."""
+
+    from PyQt5 import QtCore as _QtCore
 
     from ui.extraction import MainWindow as ExtractionMainWindow
 
-    return ExtractionMainWindow(core)
+    window = ExtractionMainWindow(core)
+    window.setWindowFlag(_QtCore.Qt.Widget, True)
+    return window
 
 
 def launch_stage_applications(
     stage_specs: Sequence[StageApplicationSpec],
     *,
+    configuration_factory: Callable[[], AppConfiguration] | None = None,
     dialog_factory: Callable[..., StartupDialog] = StartupDialog,
     application_factory: Callable[[], QtWidgets.QApplication] | None = None,
+    window_factory: Callable[[AppCore], UnifiedMainWindow] = UnifiedMainWindow,
     theme_applier: Callable[[QtWidgets.QApplication], None] = apply_application_theme,
     translation_bootstrapper: Callable[
         [QtWidgets.QApplication, TranslationConfig], object
@@ -113,29 +116,44 @@ def launch_stage_applications(
     else:
         app = application_factory()
 
+    configuration_factory = configuration_factory or AppConfiguration
+    configuration = configuration_factory()
+    configuration.diagnostics_enabled = bool(initial_diagnostics)
+
+    app_core = AppCore(configuration)
+    app_core.ensure_bootstrapped()
+
     options = [
-        StartupModuleOption(stage=spec.stage, title=spec.title, description=spec.description)
+        StartupModuleOption(
+            stage=spec.stage,
+            title=spec.title,
+            description=spec.description,
+            enabled_by_default=spec.enabled_by_default,
+        )
         for spec in stage_specs
     ]
-    dialog = dialog_factory(options, diagnostics_enabled=initial_diagnostics)
+
+    dialog = dialog_factory(
+        options,
+        diagnostics_enabled=initial_diagnostics,
+        settings=app_core.settings,
+    )
     if dialog.exec_() != QtWidgets.QDialog.Accepted:
+        app_core.shutdown()
         return 0
 
-    selected_stage = dialog.selected_stage
-    if selected_stage is None:
+    selected_stages = tuple(dialog.selected_stages)
+    if not selected_stages:
+        app_core.shutdown()
         return 0
 
     spec_lookup: Mapping[ModuleStage, StageApplicationSpec] = {
         spec.stage: spec for spec in stage_specs
     }
-    stage_spec = spec_lookup[selected_stage]
 
-    configuration = stage_spec.configuration_factory()
-    configuration.diagnostics_enabled = dialog.diagnostics_enabled
-
-    app_core = AppCore(configuration)
-    app_core.ensure_bootstrapped()
-    app_core.set_diagnostics_enabled(dialog.diagnostics_enabled, persist=True)
+    diagnostics_requested = dialog.diagnostics_enabled
+    configuration.diagnostics_enabled = diagnostics_requested
+    app_core.set_diagnostics_enabled(diagnostics_requested, persist=True)
 
     translation_config_factory = translation_config_factory or (
         lambda core: TranslationConfig(
@@ -150,7 +168,22 @@ def launch_stage_applications(
 
     theme_applier(app)
 
-    window = stage_spec.window_factory(app_core)
+    window = window_factory(app_core)
+    panes_added = 0
+    for stage in selected_stages:
+        stage_spec = spec_lookup.get(stage)
+        if stage_spec is None:
+            continue
+        pane = stage_spec.pane_factory(app_core)
+        window.add_stage_pane(stage, pane, stage_spec.title)
+        panes_added += 1
+
+    if panes_added == 0:
+        close_method = getattr(window, "close", None)
+        if callable(close_method):
+            close_method()
+        app_core.shutdown()
+        return 0
     window.show()
 
     try:
