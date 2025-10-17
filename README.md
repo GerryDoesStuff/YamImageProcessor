@@ -49,10 +49,10 @@ t on top of the provided scaffolding.
 With the environment active, start the main application shell via:
 
 ```bash
-python preprocessing22.py [--diagnostics]
+python preprocessing22.py
 ```
 
-Passing `--diagnostics` enables the additional logging and developer-oriented diagnostics that the core supports, but it is not required for normal use.
+On launch a startup dialog prompts you to choose which preprocessing modules should be available and whether diagnostics logging starts enabled. The selections persist across sessions, replacing the previous `--diagnostics` command-line switch.
 
 On subsequent runs you can reactivate the existing virtual environment and repeat the same command without reinstalling the dependencies. If you prefer to start other entry points that ship with the project, the segmentation and feature extraction pipelines can be launched with:
 
@@ -61,7 +61,7 @@ python segmentation25.py
 python extraction18.py
 ```
 
-Each script accepts the same optional `--diagnostics` flag when you need deeper visibility during troubleshooting.
+Each script presents the same startup dialog so you can tailor the enabled modules and diagnostics defaults before the main window opens.
 
 ## Version metadata
 
