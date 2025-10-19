@@ -35,6 +35,9 @@ PipelineImage = Union[NDArray, TiledPipelineImage]
 LOGGER = logging.getLogger(__name__)
 
 
+PipelineChangeListener = Callable[[str, Dict[str, Any]], None]
+
+
 def _is_colour_array(array: np.ndarray) -> bool:
     return array.ndim == 3 and array.shape[2] in (3, 4)
 
@@ -205,6 +208,7 @@ class PipelineManager:
         self._cache_directory: Optional[Path] = None
         self._recovery_root: Optional[Path] = None
         self._gpu_executor: Optional[GpuExecutor] = gpu_executor
+        self._listeners: List[PipelineChangeListener] = []
         self.set_cache_directory(cache_dir if cache_dir is not None else self._DEFAULT_CACHE_DIR)
         self.set_recovery_root(
             recovery_root if recovery_root is not None else self._DEFAULT_RECOVERY_ROOT
@@ -273,6 +277,7 @@ class PipelineManager:
     def reset(self) -> None:
         self._steps = [step.clone() for step in self._template]
         self.clear_history()
+        self._notify_listeners("pipeline_reset", steps=tuple(self._steps))
 
     def clear_history(self) -> None:
         self._undo_stack.clear()
@@ -296,6 +301,7 @@ class PipelineManager:
             self._template = [step.clone() for step in cloned]
         if not preserve_history:
             self.clear_history()
+        self._notify_listeners("steps_replaced", steps=tuple(self._steps))
 
     # ------------------------------------------------------------------
     # Step manipulation
@@ -303,20 +309,38 @@ class PipelineManager:
     def add_step(self, step: PipelineStep, index: Optional[int] = None) -> None:
         if index is None:
             self._steps.append(step)
+            inserted_at = len(self._steps) - 1
         else:
             self._steps.insert(index, step)
+            inserted_at = index
+        self._notify_listeners("step_added", step=step, index=inserted_at)
 
     def remove_step(self, index: int) -> PipelineStep:
-        return self._steps.pop(index)
+        removed = self._steps.pop(index)
+        self._notify_listeners("step_removed", step=removed, index=index)
+        return removed
 
     def move_step(self, old_index: int, new_index: int) -> None:
         step = self._steps.pop(old_index)
         self._steps.insert(new_index, step)
+        self._notify_listeners(
+            "steps_reordered",
+            step=step,
+            old_index=old_index,
+            new_index=new_index,
+            steps=tuple(self._steps),
+        )
 
     def swap_steps(self, index_a: int, index_b: int) -> None:
         self._steps[index_a], self._steps[index_b] = (
             self._steps[index_b],
             self._steps[index_a],
+        )
+        self._notify_listeners(
+            "steps_swapped",
+            first_index=index_a,
+            second_index=index_b,
+            steps=tuple(self._steps),
         )
 
     def set_order(self, order: Iterable[str]) -> None:
@@ -332,6 +356,7 @@ class PipelineManager:
             if step.name in lookup:
                 new_steps.append(step)
         self._steps = new_steps
+        self._notify_listeners("steps_reordered", steps=tuple(self._steps))
 
     def get_step(self, identifier: int | str) -> PipelineStep:
         if isinstance(identifier, int):
@@ -343,11 +368,15 @@ class PipelineManager:
 
     def set_step_enabled(self, identifier: int | str, enabled: bool) -> None:
         step = self.get_step(identifier)
+        if step.enabled == enabled:
+            return
         step.enabled = enabled
+        self._notify_listeners("step_state_changed", step=step, enabled=enabled)
 
     def toggle_step(self, identifier: int | str) -> bool:
         step = self.get_step(identifier)
         step.enabled = not step.enabled
+        self._notify_listeners("step_state_changed", step=step, enabled=step.enabled)
         return step.enabled
 
     def update_step_params(
@@ -362,6 +391,7 @@ class PipelineManager:
             step.params = dict(params)
         else:
             step.params.update(params)
+        self._notify_listeners("step_params_updated", step=step, replace=replace)
 
     def apply(self, image: PipelineImage) -> PipelineImage:
         if isinstance(image, TiledPipelineImage):
@@ -505,6 +535,7 @@ class PipelineManager:
         self._redo_stack.append(self._snapshot(current_image, current_cache_signature))
         previous = self._undo_stack.pop()
         self._steps = [step.clone() for step in previous.steps]
+        self._notify_listeners("pipeline_restored", source="undo", steps=tuple(self._steps))
         return previous.clone()
 
     def redo(
@@ -518,6 +549,7 @@ class PipelineManager:
         self._undo_stack.append(self._snapshot(current_image, current_cache_signature))
         next_state = self._redo_stack.pop()
         self._steps = [step.clone() for step in next_state.steps]
+        self._notify_listeners("pipeline_restored", source="redo", steps=tuple(self._steps))
         return next_state.clone()
 
     def history_depth(self) -> Tuple[int, int]:
@@ -532,9 +564,34 @@ class PipelineManager:
     def to_dict(self) -> Dict[str, Any]:
         return {"steps": [step.to_dict() for step in self._steps]}
 
+    # ------------------------------------------------------------------
+    # Change listener helpers
+    # ------------------------------------------------------------------
+    def add_change_listener(self, listener: PipelineChangeListener) -> None:
+        if listener in self._listeners:
+            return
+        self._listeners.append(listener)
+
+    def remove_change_listener(self, listener: PipelineChangeListener) -> None:
+        try:
+            self._listeners.remove(listener)
+        except ValueError:
+            pass
+
+    def _notify_listeners(self, event: str, **metadata: Any) -> None:
+        if not self._listeners:
+            return
+        snapshot = dict(metadata)
+        for listener in tuple(self._listeners):
+            try:
+                listener(event, dict(snapshot))
+            except Exception:  # pragma: no cover - defensive listener isolation
+                LOGGER.debug("Pipeline change listener failed", exc_info=True)
+
 
 __all__ = [
     "GpuExecutor",
+    "PipelineChangeListener",
     "PipelineManager",
     "PipelineState",
     "PipelineStep",

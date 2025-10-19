@@ -248,6 +248,85 @@ if QtCore is not None:
         for stage, result in cached_results.items():
             np.testing.assert_array_equal(result, results[stage])
 
+    def test_mutating_mid_stage_invalidates_downstream_only(
+        qapp: QtWidgets.QApplication,
+    ) -> None:
+        base_image = np.arange(9, dtype=np.float32).reshape(3, 3)
+
+        manager = PipelineManager(
+            [
+                PipelineStep(
+                    name="preprocess",
+                    function=lambda image, **_: image + 1,
+                    stage=ModuleStage.PREPROCESSING,
+                ),
+                PipelineStep(
+                    name="segment",
+                    function=lambda image, **_: image * 2,
+                    stage=ModuleStage.SEGMENTATION,
+                ),
+                PipelineStep(
+                    name="extract",
+                    function=lambda image, **_: image - 5,
+                    stage=ModuleStage.ANALYSIS,
+                ),
+            ]
+        )
+        controller = UnifiedPipelineController(_StubAppCore(manager))
+
+        controller.run_enabled_stages(base_image)
+        assert controller.cached_stage_result(ModuleStage.PREPROCESSING) is not None
+        assert controller.cached_stage_result(ModuleStage.SEGMENTATION) is not None
+        assert controller.cached_stage_result(ModuleStage.ANALYSIS) is not None
+
+        manager.toggle_step("segment")
+
+        assert controller.cached_stage_result(ModuleStage.PREPROCESSING) is not None
+        assert controller.cached_stage_result(ModuleStage.SEGMENTATION) is None
+        assert controller.cached_stage_result(ModuleStage.ANALYSIS) is None
+
+        seg_steps = controller.cached_stage_steps(ModuleStage.SEGMENTATION)
+        assert seg_steps and not seg_steps[0].enabled
+
+        controller.run_enabled_stages(base_image)
+        assert controller.cached_stage_result(ModuleStage.SEGMENTATION) is not None
+        assert controller.cached_stage_result(ModuleStage.ANALYSIS) is not None
+
+    def test_mutating_upstream_stage_invalidates_all_results(
+        qapp: QtWidgets.QApplication,
+    ) -> None:
+        base_image = np.ones((2, 2), dtype=np.float32)
+
+        manager = PipelineManager(
+            [
+                PipelineStep(
+                    name="preprocess",
+                    function=lambda image, **_: image + 2,
+                    stage=ModuleStage.PREPROCESSING,
+                ),
+                PipelineStep(
+                    name="segment",
+                    function=lambda image, **_: image * 3,
+                    stage=ModuleStage.SEGMENTATION,
+                ),
+                PipelineStep(
+                    name="extract",
+                    function=lambda image, **_: image - 1,
+                    stage=ModuleStage.ANALYSIS,
+                ),
+            ]
+        )
+        controller = UnifiedPipelineController(_StubAppCore(manager))
+
+        controller.run_enabled_stages(base_image)
+        for stage in ModuleStage:
+            assert controller.cached_stage_result(stage) is not None
+
+        manager.toggle_step("preprocess")
+
+        for stage in ModuleStage:
+            assert controller.cached_stage_result(stage) is None
+
 else:  # pragma: no cover - executed only when Qt bindings missing
 
     def test_unified_pipeline_controller_skipped() -> None:
