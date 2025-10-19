@@ -21,7 +21,6 @@ from plugins.module_base import ModuleStage
 from processing.segmentation_pipeline import (
     PipelineStep,
     ProcessingPipeline,
-    build_segmentation_pipeline,
     build_segmentation_pipeline_from_dict,
     get_settings_snapshot,
 )
@@ -38,6 +37,7 @@ from ui.theme import (
 
 from yam_processor.ui.error_reporter import ErrorResolution, present_error_report
 
+from ui.pipeline_adapter import ControllerBackedPipeline
 from ui.unified import UnifiedPipelineController
 
 LOGGER = logging.getLogger(__name__)
@@ -1147,7 +1147,13 @@ class SegmentationPane(ModulePane):
         self.redo_shortcut.activated.connect(self.redo)
 
         self._connect_controller_signals()
-        self.pipeline = build_segmentation_pipeline(self.app_core)
+        self.pipeline = ControllerBackedPipeline(
+            self._controller,
+            self._pipeline_stage,
+            source_resolver=self._segmentation_source_image,
+            seed_resolver=self._segmentation_seed_results,
+        )
+        self.rebuild_pipeline()
         self.update_pipeline_label()
         if self.base_image is not None:
             self.update_preview()
@@ -1273,6 +1279,20 @@ class SegmentationPane(ModulePane):
         except Exception:  # pragma: no cover - defensive access
             LOGGER.debug("Failed to access cached preprocessing steps", exc_info=True)
             return ()
+
+    def _segmentation_source_image(self, image: np.ndarray) -> np.ndarray:
+        if self.original_image is not None:
+            return np.asarray(self.original_image)
+        return np.asarray(image)
+
+    def _segmentation_seed_results(
+        self, image: np.ndarray
+    ) -> Dict[ModuleStage, np.ndarray]:
+        seeds: Dict[ModuleStage, np.ndarray] = {}
+        dependencies = self._controller.stage_dependencies(self._pipeline_stage)
+        if ModuleStage.PREPROCESSING in dependencies:
+            seeds[ModuleStage.PREPROCESSING] = np.asarray(image)
+        return seeds
 
     def _ensure_source_registered(self) -> Optional[str]:
         if self.pipeline_cache is None or self.base_image is None:
@@ -1402,9 +1422,30 @@ class SegmentationPane(ModulePane):
         self.pipeline_label.setText(text)
 
     def rebuild_pipeline(self):
-        self.pipeline = build_segmentation_pipeline(self.app_core)
-        logging.debug("Pipeline rebuilt: " + ", ".join([step.name for step in self.pipeline.steps]))
-        self.update_pipeline_label()
+        try:
+            settings_snapshot = get_settings_snapshot(self.settings_manager)
+            runtime_pipeline = build_segmentation_pipeline_from_dict(
+                settings_snapshot, self.app_core
+            )
+        except Exception:  # pragma: no cover - defensive rebuild
+            LOGGER.exception("Failed to rebuild segmentation pipeline from settings")
+            return
+
+        manager = self._controller.pipeline_manager()
+        combined_steps = list(manager.steps)
+        start, end = self._controller.pipeline_stage_bounds(self._pipeline_stage)
+        combined_steps[start:end] = [step.clone() for step in runtime_pipeline.steps]
+        try:
+            manager.replace_steps(combined_steps, preserve_history=True)
+        except Exception:  # pragma: no cover - defensive manager update
+            LOGGER.exception("Failed to update segmentation steps in pipeline manager")
+            return
+
+        refreshed = self._stage_pipeline_snapshot(refresh=True)
+        logging.debug(
+            "Pipeline rebuilt: " + ", ".join(step.name for step in refreshed)
+        )
+        self.update_pipeline_label(refreshed)
 
     def get_segmentation_order(self) -> List[str]:
         order_str = self.settings.value("segmentation/order", "")
@@ -2318,9 +2359,8 @@ class SegmentationPane(ModulePane):
         def _attempt_load() -> None:
             self.original_image = Loader.load_image(str(path))
             self.base_image = self.original_image.copy()
-            self.committed_image = build_segmentation_pipeline(self.app_core).apply(
-                self.base_image
-            )
+            self.rebuild_pipeline()
+            self.committed_image = self.pipeline.apply(self.base_image)
             self.current_preview = self.committed_image.copy()
             self.current_image_path = str(path)
             self._source_id = None
