@@ -8,6 +8,7 @@ from typing import Callable, Dict, Iterable, Optional, Tuple
 import numpy as np
 
 from core.thread_controller import OperationCancelled, ThreadController
+from plugins.module_base import ModuleStage
 from processing.pipeline_cache import PipelineCacheResult, PipelineCacheTileUpdate, StepRecord
 from processing.pipeline_manager import PipelineManager, PipelineStep
 
@@ -183,12 +184,16 @@ class FakeAppCore:
             params={},
             supports_tiled_input=True,
         )
+        step.stage = ModuleStage.PREPROCESSING
         self._pipeline_manager = PipelineManager([step])
         self.settings = SimpleNamespace(
             snapshot=lambda prefix="": {},
             get=lambda key, default=None: default,
             set=lambda key, value: None,
         )
+
+    def get_pipeline_manager(self) -> PipelineManager:
+        return self._pipeline_manager
 
     def get_preprocessing_pipeline_manager(self) -> PipelineManager:
         return self._pipeline_manager

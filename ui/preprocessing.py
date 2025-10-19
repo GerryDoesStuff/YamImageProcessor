@@ -9,7 +9,7 @@ import traceback
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -21,13 +21,13 @@ from core.preprocessing import Config, Loader
 from core.thread_controller import OperationCancelled, ThreadController
 from plugins.module_base import ModuleBase, ModuleStage
 from processing.pipeline_cache import PipelineCacheResult, PipelineCacheTileUpdate
-from processing.pipeline_manager import PipelineManager
+from processing.pipeline_manager import PipelineManager, PipelineStep
 from processing.preprocessing_pipeline import (
     PreprocessingPipeline,
-    build_preprocessing_pipeline,
 )
 from ui import ModulePane
 from ui.control_metadata import ControlMetadata, ControlValueType, get_control_metadata
+from ui.unified import UnifiedPipelineController
 from ui.theme import (
     SectionWidget,
     ShortcutRegistry,
@@ -617,6 +617,7 @@ class PreprocessingPane(ModulePane):
     def __init__(
         self,
         app_core: AppCore,
+        controller: UnifiedPipelineController,
         *,
         host: QtWidgets.QMainWindow,
     ):
@@ -624,6 +625,10 @@ class PreprocessingPane(ModulePane):
         self._window = host
         unified_shell = _is_unified_shell(self._window)
         self.app_core = app_core
+        self._controller = controller
+        self._pipeline_stage = ModuleStage.PREPROCESSING
+        self.pipeline_manager: PipelineManager = self._controller.pipeline_manager()
+        self._connect_controller_signals()
         if not unified_shell:
             self._window.setWindowTitle("Image Pre-Processing Module")
             self._window.resize(1200, 700)
@@ -640,10 +645,6 @@ class PreprocessingPane(ModulePane):
         self.committed_image: Optional[np.ndarray] = None
         self.current_preview: Optional[np.ndarray] = None
         self.current_image_path: Optional[str] = None
-        self.pipeline_manager: PipelineManager = (
-            self.app_core.get_preprocessing_pipeline_manager()
-        )
-        self.pipeline_manager.reset()
         self.pipeline_cache = self.app_core.pipeline_cache
         self._source_id: Optional[str] = None
         self._preview_signature: Optional[str] = None
@@ -884,13 +885,37 @@ class PreprocessingPane(ModulePane):
         self.redo_shortcut.activated.connect(self.redo)
         self._register_static_shortcuts()
 
-        self.pipeline = build_preprocessing_pipeline(self.app_core, self.pipeline_manager)
+        self.pipeline = self._build_runtime_pipeline(refresh=True)
         self.update_pipeline_label()
         if self.base_image is not None:
             self.update_preview()
 
     def _status_bar(self) -> QtWidgets.QStatusBar:
         return self._window.statusBar()
+
+    def _connect_controller_signals(self) -> None:
+        self._controller.stage_cache_updated.connect(
+            self._on_controller_stage_cache_updated
+        )
+
+    def _on_controller_stage_cache_updated(
+        self, stage: ModuleStage, steps: Tuple[PipelineStep, ...]
+    ) -> None:
+        if stage == self._pipeline_stage:
+            self.update_pipeline_label(steps)
+
+    def _stage_pipeline_snapshot(
+        self, *, refresh: bool = False
+    ) -> Tuple[PipelineStep, ...]:
+        if refresh:
+            self._controller.recompute_pipeline()
+        return self._controller.cached_stage_steps(self._pipeline_stage)
+
+    def _build_runtime_pipeline(
+        self, *, refresh: bool = False
+    ) -> PreprocessingPipeline:
+        steps = self._stage_pipeline_snapshot(refresh=refresh)
+        return PreprocessingPipeline(self.app_core, steps)
 
     def _show_status_message(self, message: str, timeout: int = 0) -> None:
         status_bar = self._status_bar()
@@ -949,8 +974,12 @@ class PreprocessingPane(ModulePane):
         self._progressive_previous_frame = None
         self.preview_display.update_array(baseline)
 
-    def update_pipeline_label(self):
-        order = [step.name for step in self.pipeline_manager.iter_enabled_steps()]
+    def update_pipeline_label(
+        self, steps: Optional[Sequence[PipelineStep]] = None
+    ) -> None:
+        if steps is None:
+            steps = self._stage_pipeline_snapshot()
+        order = [step.name for step in steps if step.enabled]
         text = "Current Pipeline: " + " -> ".join(order) if order else "Current Pipeline: (none)"
         self.pipeline_label.setText(text)
         self.pipeline_overview_list.clear()
@@ -960,7 +989,7 @@ class PreprocessingPane(ModulePane):
             self.pipeline_overview_list.addItem("(no enabled steps)")
 
     def rebuild_pipeline(self):
-        self.pipeline = build_preprocessing_pipeline(self.app_core, self.pipeline_manager)
+        self.pipeline = self._build_runtime_pipeline(refresh=True)
         logging.debug("Pipeline rebuilt with steps: " + ", ".join(step.name for step in self.pipeline.steps))
         self.update_pipeline_label()
 
@@ -2069,9 +2098,7 @@ class PreprocessingPane(ModulePane):
         self._progress_dialog.setValue(0)
         self._progress_dialog.canceled.connect(self.thread_controller.cancel)
 
-        pipeline_snapshot = build_preprocessing_pipeline(
-            self.app_core, self.pipeline_manager.clone()
-        )
+        pipeline_snapshot = self._build_runtime_pipeline(refresh=True)
         pipeline_metadata = {"stage": "preprocessing", **pipeline_snapshot.to_dict()}
         settings_snapshot = self.app_core.settings.snapshot(prefix="preprocess/")
         io_manager = self.app_core.io_manager
@@ -2266,7 +2293,7 @@ class PreprocessingPane(ModulePane):
             self._last_pipeline_metadata = self.pipeline_cache.metadata_for(
                 self._source_id, self._source_id
             )
-            self.pipeline = build_preprocessing_pipeline(self.app_core, self.pipeline_manager)
+            self.pipeline = self._build_runtime_pipeline(refresh=True)
             self._set_original_display_image(self.original_image)
             self._set_preview_display_image(self.base_image)
             self.update_preview()
@@ -2715,7 +2742,8 @@ class ModuleWindow(QtWidgets.QMainWindow):
         self.setObjectName("preprocessingMainWindow")
         self.app_core = app_core
         self._init_update_notifications()
-        self.pane = PreprocessingPane(app_core, host=self)
+        self.pipeline_controller = UnifiedPipelineController(app_core, parent=self)
+        self.pane = PreprocessingPane(app_core, self.pipeline_controller, host=self)
         self.setCentralWidget(self.pane)
         self._forward_signals()
 

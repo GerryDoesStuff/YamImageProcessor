@@ -17,6 +17,7 @@ pytest.importorskip("cv2", exc_type=ImportError)
 from processing.pipeline_cache import PipelineCacheTileUpdate
 from tests._preprocessing_mocks import FakeAppCore, FakePipelineCache
 from ui.preprocessing import MainWindow, ModuleWindow, PreprocessingPane
+from ui.unified import UnifiedPipelineController
 from yam_processor.ui import PreviewWidget, TiledImageLevel, TiledImageRecord
 
 np = pytest.importorskip("numpy")
@@ -33,7 +34,8 @@ def preprocessing_pane_host(qtbot, *, use_wrapper: bool = False):
         widget: QtWidgets.QWidget = host
     else:
         host = QtWidgets.QMainWindow()
-        pane = PreprocessingPane(app_core, host=host)
+        controller = UnifiedPipelineController(app_core, parent=host)
+        pane = PreprocessingPane(app_core, controller, host=host)
         host.setCentralWidget(pane)
         widget = pane
     qtbot.addWidget(host)
