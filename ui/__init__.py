@@ -35,6 +35,10 @@ class ModulePane(QtWidgets.QWidget, ABC):
         """Notify the pane that diagnostics visibility has changed."""
 
     @abstractmethod
+    def refresh_menus(self) -> None:
+        """Request that the pane rebuilds the host window menu bar."""
+
+    @abstractmethod
     def teardown(self) -> None:
         """Allow the pane to perform cleanup prior to application shutdown."""
 

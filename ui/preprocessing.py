@@ -1083,6 +1083,9 @@ class PreprocessingPane(ModulePane):
     def set_diagnostics_visible(self, visible: bool) -> None:
         self.diagnostics_dock.setVisible(visible)
 
+    def refresh_menus(self) -> None:
+        self.build_menu()
+
     def teardown(self) -> None:
         if hasattr(self, "diagnostics_panel") and self.diagnostics_panel is not None:
             self.diagnostics_panel.detach_from_logger()

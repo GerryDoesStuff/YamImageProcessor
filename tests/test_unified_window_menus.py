@@ -5,9 +5,8 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PyQt5 import QtGui, QtWidgets
+    from PyQt5 import QtWidgets
 except ImportError as exc:  # pragma: no cover - skip when Qt bindings unavailable
-    QtGui = None  # type: ignore[assignment]
     QtWidgets = None  # type: ignore[assignment]
     pytestmark = pytest.mark.skip(reason=f"PyQt5 unavailable: {exc}")
 else:
@@ -19,18 +18,12 @@ else:
 
 if QtWidgets is not None:
 
-    class _BrandingClobberPane(ModulePane):
-        """Stub pane that attempts to mutate the host window chrome."""
-
-        def __init__(self, host: QtWidgets.QMainWindow) -> None:
+    class _MenuPane(ModulePane):
+        def __init__(self, host: QtWidgets.QMainWindow, label: str, actions: list[str]):
             super().__init__(host)
             self._host = host
-            host.setWindowTitle("Clobbered Title")
-            icon = QtGui.QIcon()
-            pixmap = QtGui.QPixmap(16, 16)
-            pixmap.fill(QtGui.QColor("red"))
-            icon.addPixmap(pixmap)
-            host.setWindowIcon(icon)
+            self._label = label
+            self._actions = actions
 
         def on_activated(self) -> None:  # pragma: no cover - behaviourless stub
             pass
@@ -44,21 +37,25 @@ if QtWidgets is not None:
         def save_outputs(self) -> None:  # pragma: no cover - behaviourless stub
             pass
 
-        def update_pipeline_summary(self) -> None:  # pragma: no cover - stub
+        def update_pipeline_summary(self) -> None:  # pragma: no cover - behaviourless stub
             pass
 
         def set_diagnostics_visible(self, visible: bool) -> None:  # pragma: no cover
             pass
 
-        def refresh_menus(self) -> None:  # pragma: no cover - behaviourless stub
-            pass
+        def refresh_menus(self) -> None:
+            menubar = self._host.menuBar()
+            menubar.clear()
+            menu = menubar.addMenu(self._label)
+            for label in self._actions:
+                menu.addAction(label)
 
         def teardown(self) -> None:  # pragma: no cover - behaviourless stub
             pass
 
 
 @pytest.mark.skipif(QtWidgets is None, reason="PyQt5 unavailable")
-def test_unified_window_restores_branding(qtbot) -> None:
+def test_menu_bar_reflects_active_stage(qtbot) -> None:
     cache = FakePipelineCache(stream_threshold=128)
     app_core = FakeAppCore(cache)
     window = UnifiedMainWindow(app_core)
@@ -66,22 +63,29 @@ def test_unified_window_restores_branding(qtbot) -> None:
     window.show()
     QtWidgets.QApplication.processEvents()
 
-    canonical_title = window.windowTitle()
-    canonical_icon_key = window.windowIcon().cacheKey()
-
-    first = _BrandingClobberPane(window)
-    second = _BrandingClobberPane(window)
+    first = _MenuPane(window, "First Menu", ["First Action"])
+    second = _MenuPane(window, "Second Menu", ["Alpha", "Beta"])
 
     window.add_stage_pane(ModuleStage.PREPROCESSING, first, "First")
     window.add_stage_pane(ModuleStage.ANALYSIS, second, "Second")
     QtWidgets.QApplication.processEvents()
 
-    assert window.windowTitle() == canonical_title
-    assert window.windowIcon().cacheKey() == canonical_icon_key
+    def snapshot() -> list[tuple[str, list[str]]]:
+        state: list[tuple[str, list[str]]] = []
+        for action in window.menuBar().actions():
+            menu = action.menu()
+            if menu is None:
+                state.append((action.text(), []))
+            else:
+                state.append((action.text(), [child.text() for child in menu.actions()]))
+        return state
+
+    assert snapshot() == [("First Menu", ["First Action"])]
 
     window._tab_widget.setCurrentIndex(1)
     QtWidgets.QApplication.processEvents()
+    assert snapshot() == [("Second Menu", ["Alpha", "Beta"])]
 
-    assert window.windowTitle() == canonical_title
-    assert window.windowIcon().cacheKey() == canonical_icon_key
-
+    window._tab_widget.setCurrentIndex(0)
+    QtWidgets.QApplication.processEvents()
+    assert snapshot() == [("First Menu", ["First Action"])]
