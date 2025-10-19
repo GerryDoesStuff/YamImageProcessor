@@ -78,8 +78,10 @@ def _create_preprocessing_pane(
     from PyQt5 import QtCore as _QtCore
 
     from ui.preprocessing import PreprocessingPane
+    from ui.unified import UnifiedPipelineController
 
-    pane = PreprocessingPane(core, host=host)
+    controller = UnifiedPipelineController(core, parent=host)
+    pane = PreprocessingPane(core, controller, host=host)
     docks: list[StageDock] = [
         (pane.pipeline_dock, _QtCore.Qt.RightDockWidgetArea),
         (pane.diagnostics_dock, _QtCore.Qt.BottomDockWidgetArea),

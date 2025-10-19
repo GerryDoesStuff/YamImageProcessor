@@ -16,7 +16,7 @@ pytest.importorskip("cv2")
 from plugins.module_base import ModuleStage
 from tests._preprocessing_mocks import FakeAppCore, FakePipelineCache
 from ui.preprocessing import MainWindow, ModuleWindow, PreprocessingPane
-from ui.unified import UnifiedMainWindow
+from ui.unified import UnifiedMainWindow, UnifiedPipelineController
 
 
 @pytest.fixture
@@ -42,7 +42,8 @@ def window_factory(qtbot):
             window = host
         else:
             host = QtWidgets.QMainWindow()
-            pane = PreprocessingPane(app_core, host=host)
+            controller = UnifiedPipelineController(app_core, parent=host)
+            pane = PreprocessingPane(app_core, controller, host=host)
             host.setCentralWidget(pane)
             window = host
         qtbot.addWidget(host)
@@ -168,7 +169,8 @@ def test_preprocessing_pane_embeds_in_unified_window(qtbot) -> None:
     qtbot.addWidget(unified)
     unified.show()
 
-    pane = PreprocessingPane(app_core, host=unified)
+    controller = UnifiedPipelineController(app_core, parent=unified)
+    pane = PreprocessingPane(app_core, controller, host=unified)
 
     activated: list[bool] = []
 
