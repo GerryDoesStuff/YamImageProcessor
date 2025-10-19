@@ -7,7 +7,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -26,6 +26,7 @@ from processing.extraction_pipeline import (
 )
 
 from yam_processor.ui.error_reporter import ErrorResolution, present_error_report
+from ui import ModulePane
 
 
 def _build_extraction_pipeline_metadata(settings: Mapping[str, Any]) -> Dict[str, Any]:
@@ -421,12 +422,18 @@ class ApproximateShapeDialog(QtWidgets.QDialog):
 # 9. MAIN WINDOW
 #####################################
 
-class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, app_core: AppCore):
-        super().__init__()
+class ExtractionPane(ModulePane):
+    def __init__(
+        self,
+        app_core: AppCore,
+        parent: Optional[QtWidgets.QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
         self.app_core = app_core
-        self.setWindowTitle("Microscopic Feature Extraction")
-        self.resize(1200, 700)
+        self._host_window: Optional[QtWidgets.QMainWindow] = None
+        self._pending_status_message: Optional[Tuple[str, int]] = None
+        self.setObjectName("extractionPane")
+
         self.original_image: Optional[np.ndarray] = None
         self.base_image: Optional[np.ndarray] = None
         self.committed_image: Optional[np.ndarray] = None
@@ -434,68 +441,275 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.redo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.current_image_path: Optional[str] = None
+
         self.settings_manager = self.app_core.settings
         self.settings = self.settings_manager.backend
-        # Set default extraction settings if not present
-        default_methods = ["Region Properties", "Hu Moments", "LBP", "Haralick", "Gabor",
-                           "Fourier", "HOG", "Histogram", "Fractal", "Approximate Shape"]
+
+        default_methods = [
+            "Region Properties",
+            "Hu Moments",
+            "LBP",
+            "Haralick",
+            "Gabor",
+            "Fourier",
+            "HOG",
+            "Histogram",
+            "Fractal",
+            "Approximate Shape",
+        ]
         defaults = {
             "Region Properties": {},
             "Hu Moments": {},
             "LBP": {"P": 8, "R": 1.0},
             "Haralick": {"distance": 1, "angle": 0.0},
-            "Gabor": {"ksize": 21, "sigma": 5.0, "theta": 0.0, "lambd": 10.0, "gamma": 0.5, "psi": 0.0},
+            "Gabor": {
+                "ksize": 21,
+                "sigma": 5.0,
+                "theta": 0.0,
+                "lambd": 10.0,
+                "gamma": 0.5,
+                "psi": 0.0,
+            },
             "Fourier": {"num_coeff": 10},
             "HOG": {"orientations": 9, "ppc": 8, "cpb": 3},
             "Histogram": {},
             "Fractal": {"min_box_size": 2},
-            "Approximate Shape": {"error_threshold": 1.0}
+            "Approximate Shape": {"error_threshold": 1.0},
         }
-        for m in default_methods:
-            self.settings.setValue(f"extraction/{m}/enabled", False)
-            for key, value in defaults[m].items():
-                self.settings.setValue(f"extraction/{m}/{key}", value)
+        for method in default_methods:
+            self.settings.setValue(f"extraction/{method}/enabled", False)
+            for key, value in defaults[method].items():
+                self.settings.setValue(f"extraction/{method}/{key}", value)
         self.settings.setValue("extraction/order", "")
         self.order_manager = ExtractionPipelineOrderManager(self.settings)
-        central_widget = QtWidgets.QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QtWidgets.QVBoxLayout(central_widget)
+
+        self._extraction_actions: Dict[str, QtWidgets.QAction] = {}
+        self._create_actions()
+
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(6)
+
         images_layout = QtWidgets.QHBoxLayout()
-        orig_group = QtWidgets.QGroupBox("Original Image")
+        main_layout.addLayout(images_layout)
+
+        orig_group = QtWidgets.QGroupBox("Original Image", self)
         orig_layout = QtWidgets.QVBoxLayout()
         self.original_display = ImageDisplayWidget(use_rgb_format=True)
-        orig_scroll = QtWidgets.QScrollArea()
-        orig_scroll.setWidgetResizable(True)
-        orig_scroll.setWidget(self.original_display)
-        orig_layout.addWidget(orig_scroll)
+        self.original_display.setObjectName("extractionOriginalDisplay")
+        self.original_scroll = QtWidgets.QScrollArea(orig_group)
+        self.original_scroll.setWidgetResizable(True)
+        self.original_scroll.setWidget(self.original_display)
+        orig_layout.addWidget(self.original_scroll)
         orig_group.setLayout(orig_layout)
         images_layout.addWidget(orig_group)
-        feat_group = QtWidgets.QGroupBox("Feature Extraction Preview")
+
+        feat_group = QtWidgets.QGroupBox("Feature Extraction Preview", self)
         feat_layout = QtWidgets.QVBoxLayout()
         self.preview_display = ImageDisplayWidget(use_rgb_format=False)
-        feat_scroll = QtWidgets.QScrollArea()
-        feat_scroll.setWidgetResizable(True)
-        feat_scroll.setWidget(self.preview_display)
-        feat_layout.addWidget(feat_scroll)
+        self.preview_display.setObjectName("extractionPreviewDisplay")
+        self.preview_scroll = QtWidgets.QScrollArea(feat_group)
+        self.preview_scroll.setWidgetResizable(True)
+        self.preview_scroll.setWidget(self.preview_display)
+        feat_layout.addWidget(self.preview_scroll)
         feat_group.setLayout(feat_layout)
         images_layout.addWidget(feat_group)
-        main_layout.addLayout(images_layout)
-        self.pipeline_label = QtWidgets.QLabel("Current Pipeline: (none)")
+
+        self.pipeline_label = QtWidgets.QLabel("Current Pipeline: (none)", self)
+        self.pipeline_label.setObjectName("extractionPipelineLabel")
         main_layout.addWidget(self.pipeline_label)
-        self.statusBar().showMessage("Ready")
-        self.build_menu()
+
+        self._show_status_message("Ready")
+
         self.undo_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Z"), self)
         self.undo_shortcut.activated.connect(self.undo)
         self.redo_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Y"), self)
         self.redo_shortcut.activated.connect(self.redo)
+
         self.pipeline = build_extraction_pipeline(self.app_core)
         self.update_pipeline_label()
         if self.base_image is not None:
             self.update_preview()
 
+    # ------------------------------------------------------------------
+    # Host integration helpers
+    # ------------------------------------------------------------------
+    def _create_actions(self) -> None:
+        self.load_image_action = QtWidgets.QAction("Load Image", self)
+        self.load_image_action.triggered.connect(self.load_image)
+
+        self.save_image_action = QtWidgets.QAction("Save Extracted Image", self)
+        self.save_image_action.triggered.connect(self.save_processed_image)
+
+        self.mass_extract_action = QtWidgets.QAction("Mass Extract Folder", self)
+        self.mass_extract_action.triggered.connect(self.mass_extract_folder)
+
+        self.export_regions_action = QtWidgets.QAction(
+            "Export Segmented Regions", self
+        )
+        self.export_regions_action.triggered.connect(self.export_regions)
+
+        self.export_data_action = QtWidgets.QAction(
+            "Export Extraction Data", self
+        )
+        self.export_data_action.triggered.connect(self.export_data)
+
+        self.mass_export_data_action = QtWidgets.QAction(
+            "Mass Export Extraction Data", self
+        )
+        self.mass_export_data_action.triggered.connect(self.mass_export_data)
+
+        self.import_settings_action = QtWidgets.QAction(
+            "Import Extraction Settings", self
+        )
+        self.import_settings_action.triggered.connect(self.import_settings)
+
+        self.export_settings_action = QtWidgets.QAction(
+            "Export Extraction Settings", self
+        )
+        self.export_settings_action.triggered.connect(self.export_settings)
+
+        self.undo_action = QtWidgets.QAction("Undo", self)
+        self.undo_action.triggered.connect(self.undo)
+        self.undo_action.setEnabled(False)
+
+        self.redo_action = QtWidgets.QAction("Redo", self)
+        self.redo_action.triggered.connect(self.redo)
+        self.redo_action.setEnabled(False)
+
+        self.reset_action = QtWidgets.QAction("Reset All", self)
+        self.reset_action.triggered.connect(self.reset_all)
+
+        def register_extraction_action(
+            name: str, handler: Callable[[], None]
+        ) -> None:
+            action = QtWidgets.QAction(name, self)
+            action.triggered.connect(handler)
+            self._extraction_actions[name] = action
+
+        register_extraction_action(
+            "Region Properties", self.extraction_region_properties
+        )
+        register_extraction_action("Hu Moments", self.extraction_hu_moments)
+        register_extraction_action("LBP", self.extraction_lbp)
+        register_extraction_action("Haralick", self.extraction_haralick)
+        register_extraction_action("Gabor", self.extraction_gabor)
+        register_extraction_action("Fourier", self.extraction_fourier)
+        register_extraction_action("HOG", self.extraction_hog)
+        register_extraction_action("Histogram", self.extraction_histogram)
+        register_extraction_action("Fractal", self.extraction_fractal)
+        register_extraction_action(
+            "Approximate Shape", self.extraction_approximate_shape
+        )
+
+        self._update_extraction_action_labels()
+
+    def attach_host_window(self, window: QtWidgets.QMainWindow) -> None:
+        if self._host_window is window:
+            return
+
+        self._host_window = window
+        window.setCentralWidget(self)
+        window.resize(1200, 700)
+        window.setWindowTitle("Microscopic Feature Extraction")
+        self.build_menu()
+
+        if self._pending_status_message is not None:
+            message, timeout = self._pending_status_message
+            window.statusBar().showMessage(message, timeout)
+            self._pending_status_message = None
+
+    def _host(self) -> Optional[QtWidgets.QMainWindow]:
+        return self._host_window
+
+    def _show_status_message(self, message: str, timeout: int = 0) -> None:
+        if self._host_window is not None:
+            self._host_window.statusBar().showMessage(message, timeout)
+        else:
+            self._pending_status_message = (message, timeout)
+
+    def _update_extraction_action_labels(
+        self, order: Sequence[str] | None = None
+    ) -> None:
+        if order is None:
+            order = self.order_manager.get_order()
+        for name, action in self._extraction_actions.items():
+            if name in order:
+                index = order.index(name) + 1
+                action.setText(f"{index}. {name}")
+            else:
+                action.setText(name)
+
+    def build_menu(self) -> None:
+        if self._host_window is None:
+            return
+
+        menubar = self._host_window.menuBar()
+        menubar.clear()
+
+        file_menu = menubar.addMenu("File")
+        file_menu.addAction(self.load_image_action)
+        file_menu.addAction(self.save_image_action)
+        file_menu.addAction(self.mass_extract_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.export_regions_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.export_data_action)
+        file_menu.addAction(self.mass_export_data_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.import_settings_action)
+        file_menu.addAction(self.export_settings_action)
+
+        edit_menu = menubar.addMenu("Edit")
+        edit_menu.addAction(self.undo_action)
+        edit_menu.addAction(self.redo_action)
+        edit_menu.addAction(self.reset_action)
+
+        extract_menu = menubar.addMenu("Extraction")
+        for name in (
+            "Region Properties",
+            "Hu Moments",
+            "LBP",
+            "Haralick",
+            "Gabor",
+            "Fourier",
+            "HOG",
+            "Histogram",
+            "Fractal",
+            "Approximate Shape",
+        ):
+            extract_menu.addAction(self._extraction_actions[name])
+
+    # ------------------------------------------------------------------
+    # ModulePane implementation
+    # ------------------------------------------------------------------
+    def on_activated(self) -> None:
+        self.update_pipeline_label()
+        self._show_status_message("Ready")
+
+    def on_deactivated(self) -> None:  # pragma: no cover - intentional no-op
+        pass
+
+    def save_outputs(self) -> None:
+        self.save_processed_image()
+
+    def update_pipeline_summary(self) -> None:
+        self.update_pipeline_label()
+
+    def set_diagnostics_visible(self, visible: bool) -> None:  # pragma: no cover
+        del visible
+
+    def teardown(self) -> None:  # pragma: no cover - hook for future cleanup
+        pass
+
     def update_pipeline_label(self):
         order = self.order_manager.get_order()
-        self.pipeline_label.setText("Current Pipeline: " + " -> ".join(order) if order else "Current Pipeline: (none)")
+        if order:
+            label = "Current Pipeline: " + " -> ".join(order)
+        else:
+            label = "Current Pipeline: (none)"
+        self.pipeline_label.setText(label)
+        self._update_extraction_action_labels(order)
 
     def rebuild_pipeline(self):
         self.pipeline = build_extraction_pipeline(self.app_core)
@@ -579,7 +793,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.committed_image = self.base_image.copy()
             self.current_preview = self.committed_image.copy()
             self.preview_display.set_image(self.current_preview)
-            self.statusBar().showMessage("Reset all extraction settings to defaults.")
+            self._show_status_message(
+                "Reset all extraction settings to defaults."
+            )
 
     def preview_update(self, func_name: str, new_params: Dict[str, Any]):
         temp_dict = get_extraction_settings_snapshot(self.settings_manager)
@@ -596,87 +812,6 @@ class MainWindow(QtWidgets.QMainWindow):
             new_preview = temp_pipeline.apply(self.base_image)
             self.current_preview = new_preview.copy()
             self.preview_display.set_image(new_preview)
-
-    def build_menu(self):
-        menubar = self.menuBar()
-        file_menu = menubar.addMenu("File")
-        load_act = QtWidgets.QAction("Load Image", self)
-        load_act.triggered.connect(self.load_image)
-        file_menu.addAction(load_act)
-        save_act = QtWidgets.QAction("Save Extracted Image", self)
-        save_act.triggered.connect(self.save_processed_image)
-        file_menu.addAction(save_act)
-        mass_act = QtWidgets.QAction("Mass Extract Folder", self)
-        mass_act.triggered.connect(self.mass_extract_folder)
-        file_menu.addAction(mass_act)
-        file_menu.addSeparator()
-        export_regions_act = QtWidgets.QAction("Export Segmented Regions", self)
-        export_regions_act.triggered.connect(self.export_regions)
-        file_menu.addAction(export_regions_act)
-        file_menu.addSeparator()
-        export_data_act = QtWidgets.QAction("Export Extraction Data", self)
-        export_data_act.triggered.connect(self.export_data)
-        file_menu.addAction(export_data_act)
-        mass_export_data_act = QtWidgets.QAction("Mass Export Extraction Data", self)
-        mass_export_data_act.triggered.connect(self.mass_export_data)
-        file_menu.addAction(mass_export_data_act)
-        file_menu.addSeparator()
-        imp_act = QtWidgets.QAction("Import Extraction Settings", self)
-        imp_act.triggered.connect(self.import_settings)
-        file_menu.addAction(imp_act)
-        exp_act = QtWidgets.QAction("Export Extraction Settings", self)
-        exp_act.triggered.connect(self.export_settings)
-        file_menu.addAction(exp_act)
-        edit_menu = menubar.addMenu("Edit")
-        self.undo_action = QtWidgets.QAction("Undo", self)
-        self.undo_action.triggered.connect(self.undo)
-        self.undo_action.setEnabled(False)
-        edit_menu.addAction(self.undo_action)
-        self.redo_action = QtWidgets.QAction("Redo", self)
-        self.redo_action.triggered.connect(self.redo)
-        self.redo_action.setEnabled(False)
-        edit_menu.addAction(self.redo_action)
-        reset_act = QtWidgets.QAction("Reset All", self)
-        reset_act.triggered.connect(self.reset_all)
-        edit_menu.addAction(reset_act)
-        extract_menu = menubar.addMenu("Extraction")
-        def label_with_order(method):
-            order = self.get_extraction_order()
-            if method in order:
-                idx = order.index(method) + 1
-                return f"{idx}. {method}"
-            else:
-                return method
-        rp_act = QtWidgets.QAction(label_with_order("Region Properties"), self)
-        rp_act.triggered.connect(self.extraction_region_properties)
-        extract_menu.addAction(rp_act)
-        hm_act = QtWidgets.QAction(label_with_order("Hu Moments"), self)
-        hm_act.triggered.connect(self.extraction_hu_moments)
-        extract_menu.addAction(hm_act)
-        lbp_act = QtWidgets.QAction(label_with_order("LBP"), self)
-        lbp_act.triggered.connect(self.extraction_lbp)
-        extract_menu.addAction(lbp_act)
-        har_act = QtWidgets.QAction(label_with_order("Haralick"), self)
-        har_act.triggered.connect(self.extraction_haralick)
-        extract_menu.addAction(har_act)
-        gabor_act = QtWidgets.QAction(label_with_order("Gabor"), self)
-        gabor_act.triggered.connect(self.extraction_gabor)
-        extract_menu.addAction(gabor_act)
-        fourier_act = QtWidgets.QAction(label_with_order("Fourier"), self)
-        fourier_act.triggered.connect(self.extraction_fourier)
-        extract_menu.addAction(fourier_act)
-        hog_act = QtWidgets.QAction(label_with_order("HOG"), self)
-        hog_act.triggered.connect(self.extraction_hog)
-        extract_menu.addAction(hog_act)
-        hist_act = QtWidgets.QAction(label_with_order("Histogram"), self)
-        hist_act.triggered.connect(self.extraction_histogram)
-        extract_menu.addAction(hist_act)
-        fractal_act = QtWidgets.QAction(label_with_order("Fractal"), self)
-        fractal_act.triggered.connect(self.extraction_fractal)
-        extract_menu.addAction(fractal_act)
-        approx_act = QtWidgets.QAction(label_with_order("Approximate Shape"), self)
-        approx_act.triggered.connect(self.extraction_approximate_shape)
-        extract_menu.addAction(approx_act)
 
     # Extraction Handlers
     def extraction_region_properties(self):
@@ -1005,7 +1140,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.undo_stack.clear()
             self.redo_stack.clear()
             self.update_undo_redo_actions()
-            self.statusBar().showMessage("Image loaded.")
+            self._show_status_message("Image loaded.")
             self.settings.setValue("extraction/Region Properties/enabled", False)
             self.settings.setValue("extraction/Hu Moments/enabled", False)
             self.settings.setValue("extraction/LBP/enabled", False)
@@ -1373,17 +1508,76 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
 #####################################
-# MAIN ENTRY POINT
+# MODULE WINDOW WRAPPER & MAIN ENTRY
 #####################################
+
+
+class ModuleWindow(QtWidgets.QMainWindow):
+    """Host window embedding :class:`ExtractionPane`."""
+
+    def __init__(
+        self,
+        app_core: AppCore,
+        parent: Optional[QtWidgets.QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("extractionMainWindow")
+        self.app_core = app_core
+        self.pane = ExtractionPane(app_core, parent=self)
+        self.statusBar()  # ensure status bar exists prior to attachment
+        self.pane.attach_host_window(self)
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self.pane, item)
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        self.pane.teardown()
+        super().closeEvent(event)
+
+    def on_activated(self) -> None:
+        self.pane.on_activated()
+
+    def on_deactivated(self) -> None:
+        self.pane.on_deactivated()
+
+    def load_image(self) -> None:
+        self.pane.load_image()
+
+    def save_outputs(self) -> None:
+        self.pane.save_outputs()
+
+    def update_pipeline_summary(self) -> None:
+        self.pane.update_pipeline_summary()
+
+    def set_diagnostics_visible(self, visible: bool) -> None:
+        self.pane.set_diagnostics_visible(visible)
+
+    def teardown(self) -> None:
+        self.pane.teardown()
+
+
+MainWindow = ModuleWindow
+
+PipelineOrderManager = ExtractionPipelineOrderManager
+
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    window = MainWindow()
+    app_core = AppCore()
+    app_core.bootstrap()
+    window = MainWindow(app_core)
     window.show()
     sys.exit(app.exec_())
+
 
 if __name__ == "__main__":
     main()
 
 
-__all__ = ["MainWindow", "PipelineOrderManager", "ImageDisplayWidget"]
+__all__ = [
+    "ExtractionPane",
+    "ImageDisplayWidget",
+    "MainWindow",
+    "ModuleWindow",
+    "PipelineOrderManager",
+]
