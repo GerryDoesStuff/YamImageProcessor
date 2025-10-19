@@ -1,0 +1,177 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import List, Tuple
+
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+try:
+    from PyQt5 import QtCore, QtWidgets
+except ImportError as exc:  # pragma: no cover - skip when Qt bindings missing
+    QtCore = None  # type: ignore[assignment]
+    QtWidgets = None  # type: ignore[assignment]
+    pytestmark = pytest.mark.skip(reason=f"PyQt5 unavailable: {exc}")
+else:
+    from plugins.module_base import ModuleStage
+    from processing.pipeline_manager import PipelineManager, PipelineStep
+    from ui.unified import UnifiedPipelineController
+
+
+if QtCore is not None:
+
+    def _noop_processor(image, **kwargs):
+        return image
+
+
+    @pytest.fixture()
+    def qapp() -> QtWidgets.QApplication:
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+        return app
+
+
+    @pytest.fixture()
+    def pipeline_manager() -> PipelineManager:
+        steps = [
+            PipelineStep(
+                name="preprocess",
+                function=_noop_processor,
+                params={"gain": 1},
+                stage=ModuleStage.PREPROCESSING,
+            ),
+            PipelineStep(
+                name="segment",
+                function=_noop_processor,
+                params={"threshold": 0.25},
+                stage=ModuleStage.SEGMENTATION,
+            ),
+            PipelineStep(
+                name="extract",
+                function=_noop_processor,
+                params={"features": ["Hu"]},
+                stage=ModuleStage.ANALYSIS,
+            ),
+        ]
+        return PipelineManager(steps)
+
+
+    @dataclass
+    class _Probe:
+        received: List[Tuple[PipelineStep, ...]]
+
+
+    class _PaneProbe(QtCore.QObject):
+        def __init__(
+            self,
+            controller: UnifiedPipelineController,
+            stage: ModuleStage,
+            probe: _Probe,
+        ) -> None:
+            super().__init__(controller)
+            self._stage = stage
+            self._probe = probe
+            controller.stage_cache_updated.connect(self._on_stage_cache_updated)
+
+        def _on_stage_cache_updated(
+            self, stage: ModuleStage, steps: Tuple[PipelineStep, ...]
+        ) -> None:
+            if stage == self._stage:
+                self._probe.received.append(steps)
+
+
+    class _StubAppCore:
+        def __init__(self, manager: PipelineManager) -> None:
+            self._manager = manager
+
+        def get_pipeline_manager(self) -> PipelineManager:
+            return self._manager
+
+
+    @pytest.fixture()
+    def controller(pipeline_manager: PipelineManager) -> UnifiedPipelineController:
+        return UnifiedPipelineController(_StubAppCore(pipeline_manager))
+
+
+    @pytest.fixture()
+    def segmentation_probe(controller: UnifiedPipelineController) -> _Probe:
+        probe = _Probe(received=[])
+        _PaneProbe(controller, ModuleStage.SEGMENTATION, probe)
+        return probe
+
+
+    @pytest.fixture()
+    def extraction_probe(controller: UnifiedPipelineController) -> _Probe:
+        probe = _Probe(received=[])
+        _PaneProbe(controller, ModuleStage.ANALYSIS, probe)
+        return probe
+
+
+    def test_pipeline_controller_updates_downstream_caches(
+        qapp: QtWidgets.QApplication,
+        controller: UnifiedPipelineController,
+        segmentation_probe: _Probe,
+        extraction_probe: _Probe,
+        pipeline_manager: PipelineManager,
+    ) -> None:
+        controller.recompute_pipeline()
+
+        assert len(segmentation_probe.received) == 1
+        assert len(extraction_probe.received) == 1
+
+        initial_segmentation_steps = segmentation_probe.received[-1]
+        initial_extraction_steps = extraction_probe.received[-1]
+
+        initial_bounds = {
+            stage: controller.pipeline_stage_bounds(stage)
+            for stage in ModuleStage
+        }
+        initial_combined_cache = controller.cached_pipeline()
+        initial_pre_cache = controller.cached_stage_steps(ModuleStage.PREPROCESSING)
+        assert initial_pre_cache[0].params["gain"] == 1
+
+        def _mutate_gain(step: PipelineStep) -> None:
+            step.params["gain"] = 5
+
+        controller.mutate_stage_step(
+            ModuleStage.PREPROCESSING,
+            index=0,
+            mutator=_mutate_gain,
+        )
+
+        assert len(segmentation_probe.received) == 2
+        assert len(extraction_probe.received) == 2
+
+        updated_segmentation_steps = segmentation_probe.received[-1]
+        updated_extraction_steps = extraction_probe.received[-1]
+        assert updated_segmentation_steps is not initial_segmentation_steps
+        assert updated_extraction_steps is not initial_extraction_steps
+        assert updated_segmentation_steps[0] is not initial_segmentation_steps[0]
+        assert updated_extraction_steps[0] is not initial_extraction_steps[0]
+
+        updated_bounds = {
+            stage: controller.pipeline_stage_bounds(stage)
+            for stage in ModuleStage
+        }
+        assert updated_bounds == initial_bounds
+
+        updated_pre_cache = controller.cached_stage_steps(ModuleStage.PREPROCESSING)
+        assert updated_pre_cache is not initial_pre_cache
+        assert updated_pre_cache[0].params["gain"] == 5
+
+        updated_combined_cache = controller.cached_pipeline()
+        assert updated_combined_cache is not initial_combined_cache
+        assert updated_combined_cache[0].params["gain"] == 5
+
+        live_pre_steps = controller.stage_steps(ModuleStage.PREPROCESSING)
+        assert live_pre_steps[0].params["gain"] == 5
+
+        assert pipeline_manager.steps[0].params["gain"] == 5
+
+else:  # pragma: no cover - executed only when Qt bindings missing
+
+    def test_unified_pipeline_controller_skipped() -> None:
+        pytest.skip("PyQt5 unavailable")
