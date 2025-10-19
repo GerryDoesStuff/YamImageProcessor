@@ -2,6 +2,8 @@ import json
 import os
 from unittest.mock import MagicMock
 
+from processing.pipeline_manager import PipelineManager
+
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -80,6 +82,7 @@ class StubAppCore:
     def __init__(self) -> None:
         self._settings = StubSettingsManager()
         self._io_manager = StubIOManager()
+        self._pipeline_manager = PipelineManager()
 
     def ensure_bootstrapped(self) -> None:
         pass
@@ -91,6 +94,9 @@ class StubAppCore:
     @property
     def io_manager(self) -> StubIOManager:
         return self._io_manager
+
+    def get_pipeline_manager(self) -> PipelineManager:
+        return self._pipeline_manager
 
 
 if QtWidgets is not None:
