@@ -5,7 +5,19 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Protocol, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Protocol,
+    Tuple,
+    Union,
+)
 
 import numpy as np
 
@@ -58,6 +70,10 @@ class GpuExecutor(Protocol):
         """Execute ``step`` using an accelerator backend."""
 
 
+if TYPE_CHECKING:  # pragma: no cover - imported for typing only
+    from plugins.module_base import ModuleStage
+
+
 @dataclass
 class PipelineStep:
     """A single step in an image processing pipeline."""
@@ -68,6 +84,7 @@ class PipelineStep:
     params: Dict[str, Any] = field(default_factory=dict)
     execution: StepExecutionMetadata = field(default_factory=StepExecutionMetadata)
     supports_tiled_input: bool = False
+    stage: Optional["ModuleStage"] = field(default=None, repr=False, compare=False)
 
     def apply(self, image: PipelineImage) -> PipelineImage:
         """Execute the processing step if enabled."""
@@ -103,6 +120,7 @@ class PipelineStep:
                 requires_gpu=self.execution.requires_gpu,
             ),
             supports_tiled_input=self.supports_tiled_input,
+            stage=self.stage,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -115,6 +133,9 @@ class PipelineStep:
             payload["execution"] = self.execution.to_dict()
         if self.supports_tiled_input:
             payload["supports_tiled_input"] = True
+        if self.stage is not None:
+            stage_value = getattr(self.stage, "value", None)
+            payload["stage"] = stage_value if stage_value is not None else str(self.stage)
         return payload
 
     @classmethod
@@ -123,6 +144,18 @@ class PipelineStep:
         data: Dict[str, Any],
         function: Callable[..., PipelineImage],
     ) -> "PipelineStep":
+        stage_value = data.get("stage")
+        stage: Optional["ModuleStage"] = None
+        if stage_value is not None:
+            if isinstance(stage_value, str):
+                try:  # pragma: no cover - runtime import
+                    from plugins.module_base import ModuleStage as _ModuleStage
+
+                    stage = _ModuleStage(stage_value)
+                except Exception:
+                    stage = None
+            else:
+                stage = stage_value  # type: ignore[assignment]
         return cls(
             name=data["name"],
             function=function,
@@ -130,6 +163,7 @@ class PipelineStep:
             params=dict(data.get("params", {})),
             execution=StepExecutionMetadata.from_dict(data.get("execution", {})),
             supports_tiled_input=bool(data.get("supports_tiled_input", False)),
+            stage=stage,
         )
 
 
