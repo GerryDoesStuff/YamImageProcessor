@@ -9,6 +9,7 @@ from typing import (
     Dict,
     Iterable,
     List,
+    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -507,7 +508,10 @@ class UnifiedPipelineController(QtCore.QObject):
         return self._combined_cache
 
     def run_enabled_stages(
-        self, source_image: PipelineImage
+        self,
+        source_image: PipelineImage,
+        *,
+        seeded_results: Optional[Mapping[ModuleStage, PipelineImage]] = None,
     ) -> Dict[ModuleStage, PipelineImage]:
         """Execute enabled stages sequentially, caching intermediate images.
 
@@ -515,6 +519,10 @@ class UnifiedPipelineController(QtCore.QObject):
         ----------
         source_image:
             The initial image supplied to the first stage in the pipeline.
+        seeded_results:
+            Optional mapping providing precomputed outputs for specific stages.
+            When supplied, seeded stages will not be re-executed and downstream
+            stages will consume the provided results instead.
 
         Returns
         -------
@@ -524,6 +532,8 @@ class UnifiedPipelineController(QtCore.QObject):
         """
 
         stage_results: Dict[ModuleStage, PipelineImage] = {}
+        if seeded_results:
+            stage_results.update(seeded_results)
         for stage in self._stage_order:
             dependencies = self._stage_dependencies.get(stage, ())
             stage_input: PipelineImage = source_image
@@ -531,18 +541,21 @@ class UnifiedPipelineController(QtCore.QObject):
                 if dependency in stage_results:
                     stage_input = stage_results[dependency]
 
-            result = stage_input
-            executed = False
-            for step in self.stage_steps(stage):
-                if not step.enabled:
-                    continue
-                executed = True
-                result = step.apply(result)
-
-            if not executed:
+            if stage in stage_results:
+                result = stage_results[stage]
+            else:
                 result = stage_input
+                executed = False
+                for step in self.stage_steps(stage):
+                    if not step.enabled:
+                        continue
+                    executed = True
+                    result = step.apply(result)
 
-            stage_results[stage] = result
+                if not executed:
+                    result = stage_input
+
+                stage_results[stage] = result
 
         self._stage_results = dict(stage_results)
         return dict(stage_results)

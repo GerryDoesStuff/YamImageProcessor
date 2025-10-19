@@ -35,6 +35,7 @@ from core.path_sanitizer import PathValidationError, sanitize_user_path
 from plugins.module_base import ModuleStage
 from processing.extraction_pipeline import get_extraction_settings_snapshot
 from processing.pipeline_manager import PipelineStep as ManagedPipelineStep
+from ui.pipeline_adapter import ControllerBackedPipeline, coerce_pipeline_image
 from ui.unified import UnifiedPipelineController
 
 from yam_processor.ui.error_reporter import ErrorResolution, present_error_report
@@ -59,55 +60,6 @@ def _build_extraction_pipeline_metadata(settings: Mapping[str, Any]) -> Dict[str
 
 
 LOGGER = logging.getLogger(__name__)
-
-
-def _coerce_pipeline_output(result: object) -> np.ndarray:
-    """Convert ``result`` to a NumPy array without copying unnecessarily."""
-
-    if isinstance(result, np.ndarray):
-        return np.asarray(result)
-
-    to_array = getattr(result, "to_array", None)
-    if callable(to_array):
-        try:
-            array = to_array()
-        except Exception:  # pragma: no cover - defensive conversion
-            LOGGER.debug("Failed to coerce pipeline output via to_array", exc_info=True)
-        else:
-            return np.asarray(array)
-
-    return np.asarray(result)
-
-
-class ControllerBackedPipeline:
-    """Lightweight adapter exposing controller-backed ``apply`` semantics."""
-
-    def __init__(
-        self, controller: UnifiedPipelineController, stage: ModuleStage
-    ) -> None:
-        self._controller = controller
-        self._stage = stage
-
-    @property
-    def steps(self) -> Tuple[ManagedPipelineStep, ...]:
-        try:
-            return self._controller.stage_steps(self._stage)
-        except Exception:  # pragma: no cover - defensive access
-            LOGGER.debug("Failed to access controller steps", exc_info=True)
-            return ()
-
-    def apply(self, image: np.ndarray) -> np.ndarray:
-        result = np.asarray(image)
-        for step in self._controller.stage_steps(self._stage):
-            if not getattr(step, "enabled", True):
-                continue
-            try:
-                intermediate = step.apply(result)
-            except Exception:  # pragma: no cover - defensive execution
-                LOGGER.exception("Failed to execute extraction step %s", step.name)
-                raise
-            result = _coerce_pipeline_output(intermediate)
-        return np.array(result, copy=True)
 
 
 def _is_unified_shell(window: Optional[QtWidgets.QWidget]) -> bool:
@@ -641,7 +593,10 @@ class ExtractionPane(ModulePane):
         self.redo_shortcut.activated.connect(self.redo)
 
         self.pipeline = ControllerBackedPipeline(
-            self._controller, self._pipeline_stage
+            self._controller,
+            self._pipeline_stage,
+            source_resolver=self._extraction_source_image,
+            seed_resolver=self._extraction_seed_results,
         )
         self._connect_controller_signals()
         self.rebuild_pipeline()
@@ -968,7 +923,7 @@ class ExtractionPane(ModulePane):
             step = self._build_stage_step(name, override_map.get(name))
             if step is None:
                 continue
-            result = _coerce_pipeline_output(step.apply(result))
+            result = coerce_pipeline_image(step.apply(result))
         return np.array(result, copy=True)
 
     # ------------------------------------------------------------------
@@ -1079,6 +1034,20 @@ class ExtractionPane(ModulePane):
         except Exception:  # pragma: no cover - defensive preview update
             LOGGER.debug("Failed to refresh extraction preview", exc_info=True)
         self._show_status_message("Extraction updated from upstream results.")
+
+    def _extraction_source_image(self, image: np.ndarray) -> np.ndarray:
+        if self.original_image is not None:
+            return np.asarray(self.original_image)
+        return np.asarray(image)
+
+    def _extraction_seed_results(
+        self, image: np.ndarray
+    ) -> Dict[ModuleStage, np.ndarray]:
+        seeds: Dict[ModuleStage, np.ndarray] = {}
+        dependencies = self._controller.stage_dependencies(self._pipeline_stage)
+        if ModuleStage.SEGMENTATION in dependencies:
+            seeds[ModuleStage.SEGMENTATION] = np.asarray(image)
+        return seeds
 
     def build_menu(self) -> None:
         if self._host_window is None:
