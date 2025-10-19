@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, cast
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, cast
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from core.app_core import AppCore
 from plugins.module_base import ModuleStage
+from processing.pipeline_manager import PipelineManager, PipelineStep
 from ui import ModulePane
 from ui.theme import ThemedDockWidget
 from yam_processor.ui.diagnostics_panel import DiagnosticsPanel
@@ -361,9 +362,165 @@ class UnifiedMainWindow(QtWidgets.QMainWindow):
         super().closeEvent(event)
 
 
+class UnifiedPipelineController(QtCore.QObject):
+    """Coordinate unified pipeline operations across module stages."""
+
+    stage_steps_inserted = QtCore.pyqtSignal(object, int, object)
+    stage_steps_removed = QtCore.pyqtSignal(object, int, object)
+    stage_steps_updated = QtCore.pyqtSignal(object, int, object)
+    stage_cache_updated = QtCore.pyqtSignal(object, object)
+    pipeline_recomputed = QtCore.pyqtSignal(object)
+
+    def __init__(
+        self, app_core: AppCore, parent: Optional[QtCore.QObject] = None
+    ) -> None:
+        super().__init__(parent)
+        self._app_core = app_core
+        self._pipeline_manager: PipelineManager = app_core.get_pipeline_manager()
+        self._stage_order: Tuple[ModuleStage, ...] = tuple(ModuleStage)
+        self._stage_ranges: Dict[ModuleStage, Tuple[int, int]] = {}
+        self._stage_cache: Dict[ModuleStage, Tuple[PipelineStep, ...]] = {}
+        self._combined_cache: Tuple[PipelineStep, ...] = ()
+        self.recompute_pipeline()
+
+    # ------------------------------------------------------------------
+    # Stage information helpers
+    # ------------------------------------------------------------------
+    def pipeline_manager(self) -> PipelineManager:
+        """Return the shared :class:`PipelineManager` instance."""
+
+        return self._pipeline_manager
+
+    def pipeline_stage_bounds(self, stage: ModuleStage) -> Tuple[int, int]:
+        """Return the current (start, end) bounds for ``stage``."""
+
+        return self._stage_ranges[stage]
+
+    def stage_slice(self, stage: ModuleStage) -> slice:
+        """Return a slice targeting ``stage`` within the unified pipeline."""
+
+        start, end = self.pipeline_stage_bounds(stage)
+        return slice(start, end)
+
+    def stage_steps(self, stage: ModuleStage) -> Tuple[PipelineStep, ...]:
+        """Return the live pipeline steps backing ``stage``."""
+
+        start, end = self.pipeline_stage_bounds(stage)
+        return tuple(self._pipeline_manager.steps[start:end])
+
+    def cached_stage_steps(self, stage: ModuleStage) -> Tuple[PipelineStep, ...]:
+        """Return a cached snapshot of the steps owned by ``stage``."""
+
+        return self._stage_cache.get(stage, ())
+
+    def cached_pipeline(self) -> Tuple[PipelineStep, ...]:
+        """Return a cached snapshot of the entire pipeline."""
+
+        return self._combined_cache
+
+    # ------------------------------------------------------------------
+    # Mutation helpers
+    # ------------------------------------------------------------------
+    def insert_stage_step(
+        self,
+        stage: ModuleStage,
+        step: PipelineStep,
+        index: Optional[int] = None,
+    ) -> None:
+        """Insert ``step`` into ``stage`` at ``index`` (append if ``None``)."""
+
+        insert_at, global_index = self._resolve_insert_index(stage, index)
+        normalised = self._normalise_step(stage, step)
+        self._pipeline_manager.add_step(normalised, index=global_index)
+        self._refresh_caches()
+        self.stage_steps_inserted.emit(stage, insert_at, normalised.clone())
+
+    def remove_stage_step(self, stage: ModuleStage, index: int) -> PipelineStep:
+        """Remove and return the step at ``index`` within ``stage``."""
+
+        global_index = self._resolve_index(stage, index)
+        removed = self._pipeline_manager.remove_step(global_index)
+        self._refresh_caches()
+        self.stage_steps_removed.emit(stage, index, removed.clone())
+        return removed
+
+    def mutate_stage_step(
+        self,
+        stage: ModuleStage,
+        index: int,
+        mutator: Callable[[PipelineStep], None],
+    ) -> PipelineStep:
+        """Apply ``mutator`` to the step at ``index`` within ``stage``."""
+
+        global_index = self._resolve_index(stage, index)
+        step = self._pipeline_manager.get_step(global_index)
+        mutator(step)
+        self._refresh_caches()
+        self.stage_steps_updated.emit(stage, index, step.clone())
+        return step
+
+    # ------------------------------------------------------------------
+    # Cache management
+    # ------------------------------------------------------------------
+    def recompute_pipeline(self) -> Tuple[PipelineStep, ...]:
+        """Recompute cached snapshots for every stage and the full pipeline."""
+
+        steps = tuple(self._pipeline_manager.steps)
+        self._recalculate_stage_ranges(steps)
+        self._combined_cache = tuple(step.clone() for step in steps)
+        for stage in self._stage_order:
+            start, end = self._stage_ranges[stage]
+            stage_steps = steps[start:end]
+            self._stage_cache[stage] = tuple(step.clone() for step in stage_steps)
+            self.stage_cache_updated.emit(stage, self._stage_cache[stage])
+        self.pipeline_recomputed.emit(self._combined_cache)
+        return self._combined_cache
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _resolve_index(self, stage: ModuleStage, index: int) -> int:
+        start, end = self.pipeline_stage_bounds(stage)
+        length = end - start
+        if index < 0 or index >= length:
+            raise IndexError(f"Stage index {index} out of range for {stage}")
+        return start + index
+
+    def _resolve_insert_index(
+        self, stage: ModuleStage, index: Optional[int]
+    ) -> Tuple[int, int]:
+        start, end = self.pipeline_stage_bounds(stage)
+        length = end - start
+        insert_at = length if index is None else index
+        if insert_at < 0 or insert_at > length:
+            raise IndexError(f"Insert index {insert_at} out of range for {stage}")
+        return insert_at, start + insert_at
+
+    def _normalise_step(self, stage: ModuleStage, step: PipelineStep) -> PipelineStep:
+        if getattr(step, "stage", None) != stage:
+            clone = step.clone()
+            clone.stage = stage
+            return clone
+        return step
+
+    def _refresh_caches(self) -> None:
+        self.recompute_pipeline()
+
+    def _recalculate_stage_ranges(self, steps: Sequence[PipelineStep]) -> None:
+        index = 0
+        total = len(steps)
+        for stage in self._stage_order:
+            start = index
+            while index < total and getattr(steps[index], "stage", None) == stage:
+                index += 1
+            self._stage_ranges[stage] = (start, index)
+
+
 __all__ = [
     "UnifiedMainWindow",
+    "UnifiedPipelineController",
     "StageToolbar",
     "StageDock",
     "StageRegistration",
 ]
+
