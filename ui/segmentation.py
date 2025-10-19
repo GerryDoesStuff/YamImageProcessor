@@ -1238,6 +1238,9 @@ class SegmentationPane(ModulePane):
         if hasattr(self, "show_shortcut_dock_action"):
             self.show_shortcut_dock_action.setChecked(visible)
 
+    def refresh_menus(self) -> None:
+        self.build_menu()
+
     def teardown(self) -> None:  # pragma: no cover - hook for future cleanup
         pass
 

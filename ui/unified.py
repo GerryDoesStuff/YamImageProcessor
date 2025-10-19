@@ -260,6 +260,12 @@ class UnifiedMainWindow(QtWidgets.QMainWindow):
         self._update_stage_indicator(stage)
         self._apply_stage_status(stage)
         try:
+            registration.pane.refresh_menus()
+        except Exception:  # pragma: no cover - defensive menu refresh
+            logging.getLogger(__name__).exception(
+                "Error while refreshing menus for stage %s", stage
+            )
+        try:
             registration.pane.on_activated()
         except Exception:  # pragma: no cover - defensive activation
             logging.getLogger(__name__).exception(

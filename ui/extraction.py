@@ -721,6 +721,9 @@ class ExtractionPane(ModulePane):
     def set_diagnostics_visible(self, visible: bool) -> None:  # pragma: no cover
         del visible
 
+    def refresh_menus(self) -> None:
+        self.build_menu()
+
     def teardown(self) -> None:  # pragma: no cover - hook for future cleanup
         pass
 
