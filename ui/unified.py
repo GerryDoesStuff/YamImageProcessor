@@ -4,13 +4,22 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, cast
+from typing import (
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    cast,
+)
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from core.app_core import AppCore
 from plugins.module_base import ModuleStage
-from processing.pipeline_manager import PipelineManager, PipelineStep
+from processing.pipeline_manager import PipelineImage, PipelineManager, PipelineStep
 from ui import ModulePane
 from ui.theme import ThemedDockWidget
 from yam_processor.ui.diagnostics_panel import DiagnosticsPanel
@@ -380,6 +389,10 @@ class UnifiedPipelineController(QtCore.QObject):
         self._stage_order: Tuple[ModuleStage, ...] = tuple(ModuleStage)
         self._stage_ranges: Dict[ModuleStage, Tuple[int, int]] = {}
         self._stage_cache: Dict[ModuleStage, Tuple[PipelineStep, ...]] = {}
+        self._stage_results: Dict[ModuleStage, PipelineImage] = {}
+        self._stage_dependencies: Dict[ModuleStage, Tuple[ModuleStage, ...]] = (
+            self._build_stage_dependencies()
+        )
         self._combined_cache: Tuple[PipelineStep, ...] = ()
         self.recompute_pipeline()
 
@@ -417,6 +430,21 @@ class UnifiedPipelineController(QtCore.QObject):
         """Return a cached snapshot of the entire pipeline."""
 
         return self._combined_cache
+
+    def stage_dependencies(self, stage: ModuleStage) -> Tuple[ModuleStage, ...]:
+        """Return the upstream stage dependencies for ``stage``."""
+
+        return self._stage_dependencies.get(stage, ())
+
+    def cached_stage_result(self, stage: ModuleStage) -> Optional[PipelineImage]:
+        """Return the most recent cached image produced by ``stage``."""
+
+        return self._stage_results.get(stage)
+
+    def cached_stage_results(self) -> Dict[ModuleStage, PipelineImage]:
+        """Return a shallow copy of all cached stage results."""
+
+        return dict(self._stage_results)
 
     # ------------------------------------------------------------------
     # Mutation helpers
@@ -467,6 +495,8 @@ class UnifiedPipelineController(QtCore.QObject):
 
         steps = tuple(self._pipeline_manager.steps)
         self._recalculate_stage_ranges(steps)
+        self._stage_dependencies = self._build_stage_dependencies()
+        self._stage_results.clear()
         self._combined_cache = tuple(step.clone() for step in steps)
         for stage in self._stage_order:
             start, end = self._stage_ranges[stage]
@@ -475,6 +505,47 @@ class UnifiedPipelineController(QtCore.QObject):
             self.stage_cache_updated.emit(stage, self._stage_cache[stage])
         self.pipeline_recomputed.emit(self._combined_cache)
         return self._combined_cache
+
+    def run_enabled_stages(
+        self, source_image: PipelineImage
+    ) -> Dict[ModuleStage, PipelineImage]:
+        """Execute enabled stages sequentially, caching intermediate images.
+
+        Parameters
+        ----------
+        source_image:
+            The initial image supplied to the first stage in the pipeline.
+
+        Returns
+        -------
+        Dict[ModuleStage, PipelineImage]
+            A mapping of stage identifiers to the most recent image produced
+            after that stage has executed.
+        """
+
+        stage_results: Dict[ModuleStage, PipelineImage] = {}
+        for stage in self._stage_order:
+            dependencies = self._stage_dependencies.get(stage, ())
+            stage_input: PipelineImage = source_image
+            for dependency in dependencies:
+                if dependency in stage_results:
+                    stage_input = stage_results[dependency]
+
+            result = stage_input
+            executed = False
+            for step in self.stage_steps(stage):
+                if not step.enabled:
+                    continue
+                executed = True
+                result = step.apply(result)
+
+            if not executed:
+                result = stage_input
+
+            stage_results[stage] = result
+
+        self._stage_results = dict(stage_results)
+        return dict(stage_results)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -514,6 +585,14 @@ class UnifiedPipelineController(QtCore.QObject):
             while index < total and getattr(steps[index], "stage", None) == stage:
                 index += 1
             self._stage_ranges[stage] = (start, index)
+
+    def _build_stage_dependencies(self) -> Dict[ModuleStage, Tuple[ModuleStage, ...]]:
+        dependencies: Dict[ModuleStage, Tuple[ModuleStage, ...]] = {}
+        upstream: List[ModuleStage] = []
+        for stage in self._stage_order:
+            dependencies[stage] = tuple(upstream)
+            upstream.append(stage)
+        return dependencies
 
 
 __all__ = [
