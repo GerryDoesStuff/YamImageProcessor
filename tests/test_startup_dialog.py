@@ -11,7 +11,11 @@ QtCore = pytest.importorskip("PyQt5.QtCore", exc_type=ImportError)
 QtWidgets = pytest.importorskip("PyQt5.QtWidgets", exc_type=ImportError)
 
 from core.app_core import AppConfiguration
-from core.application_launcher import StageApplicationSpec, launch_stage_applications
+from core.application_launcher import (
+    StageApplicationSpec,
+    StagePaneFactoryResult,
+    launch_stage_applications,
+)
 from core.settings import SettingsManager
 from plugins.module_base import ModuleStage
 from ui.startup import StartupDialog, StartupModuleOption
@@ -131,7 +135,16 @@ def test_launcher_uses_selected_stage(monkeypatch) -> None:
             self.shown = False
             self.added: List[tuple[ModuleStage, str]] = []
 
-        def add_stage_pane(self, stage: ModuleStage, widget: QtWidgets.QWidget, title: str) -> None:
+        def add_stage_pane(
+            self,
+            stage: ModuleStage,
+            widget: QtWidgets.QWidget,
+            title: str,
+            *,
+            toolbars=None,
+            docks=None,
+            status_message=None,
+        ) -> None:
             self.added.append((stage, title))
 
         def show(self) -> None:
@@ -144,11 +157,33 @@ def test_launcher_uses_selected_stage(monkeypatch) -> None:
         windows.append(window)
         return window
 
+    class _DummyPane(QtWidgets.QWidget):
+        def on_activated(self) -> None:
+            pass
+
+        def on_deactivated(self) -> None:
+            pass
+
+        def load_image(self) -> None:
+            pass
+
+        def save_outputs(self) -> None:
+            pass
+
+        def update_pipeline_summary(self) -> None:
+            pass
+
+        def set_diagnostics_visible(self, visible: bool) -> None:
+            pass
+
+        def teardown(self) -> None:
+            pass
+
     spec = StageApplicationSpec(
         stage=ModuleStage.SEGMENTATION,
         title="Segmentation",
         description="Detect regions",
-        pane_factory=lambda _: QtWidgets.QWidget(),
+        pane_factory=lambda _core, _host: StagePaneFactoryResult(_DummyPane()),
     )
 
     class _FakeDialog:

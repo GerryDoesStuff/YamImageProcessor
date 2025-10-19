@@ -11,9 +11,20 @@ from PyQt5 import QtCore, QtWidgets
 from core.app_core import AppConfiguration, AppCore
 from core.i18n import TranslationConfig, bootstrap_translations
 from plugins.module_base import ModuleStage
+from ui import ModulePane
 from ui.startup import StartupDialog, StartupModuleOption
 from ui.theme import apply_application_theme
-from ui.unified import UnifiedMainWindow
+from ui.unified import StageDock, StageToolbar, UnifiedMainWindow
+
+
+@dataclass(frozen=True)
+class StagePaneFactoryResult:
+    """Return value describing pane registration metadata."""
+
+    pane: ModulePane
+    toolbars: Sequence[StageToolbar] = ()
+    docks: Sequence[StageDock] = ()
+    status_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -22,9 +33,10 @@ class StageApplicationSpec:
 
     stage: ModuleStage
     title: str
-    pane_factory: Callable[[AppCore], QtWidgets.QWidget]
+    pane_factory: Callable[[AppCore, QtWidgets.QMainWindow], StagePaneFactoryResult]
     description: str = ""
     enabled_by_default: bool = True
+    window_factory: Callable[[AppCore], QtWidgets.QMainWindow] | None = None
 
 
 def default_stage_specifications() -> list[StageApplicationSpec]:
@@ -37,6 +49,7 @@ def default_stage_specifications() -> list[StageApplicationSpec]:
             description="Prepare imagery before segmentation or feature extraction.",
             pane_factory=_create_preprocessing_pane,
             enabled_by_default=True,
+            window_factory=_create_preprocessing_window,
         ),
         StageApplicationSpec(
             stage=ModuleStage.SEGMENTATION,
@@ -44,6 +57,7 @@ def default_stage_specifications() -> list[StageApplicationSpec]:
             description="Isolate meaningful regions from the prepared imagery.",
             pane_factory=_create_segmentation_pane,
             enabled_by_default=True,
+            window_factory=_create_segmentation_window,
         ),
         StageApplicationSpec(
             stage=ModuleStage.ANALYSIS,
@@ -51,44 +65,81 @@ def default_stage_specifications() -> list[StageApplicationSpec]:
             description="Extract quantitative descriptors from segmented data.",
             pane_factory=_create_extraction_pane,
             enabled_by_default=False,
+            window_factory=_create_extraction_window,
         ),
     ]
 
 
-def _create_preprocessing_pane(core: AppCore) -> QtWidgets.QWidget:
+def _create_preprocessing_pane(
+    core: AppCore, host: QtWidgets.QMainWindow
+) -> StagePaneFactoryResult:
     """Import and construct the preprocessing pane lazily."""
 
     from PyQt5 import QtCore as _QtCore
 
-    from ui.preprocessing import MainWindow as PreprocessingMainWindow
+    from ui.preprocessing import PreprocessingPane
 
-    window = PreprocessingMainWindow(core)
-    window.setWindowFlag(_QtCore.Qt.Widget, True)
-    return window
+    pane = PreprocessingPane(core, host=host)
+    docks: list[StageDock] = [
+        (pane.pipeline_dock, _QtCore.Qt.RightDockWidgetArea),
+        (pane.diagnostics_dock, _QtCore.Qt.BottomDockWidgetArea),
+        (pane.module_controls_dock, _QtCore.Qt.LeftDockWidgetArea),
+    ]
+    for dock, _ in docks:
+        host.removeDockWidget(dock)
+        dock.hide()
+    return StagePaneFactoryResult(pane=pane, docks=docks)
 
 
-def _create_segmentation_pane(core: AppCore) -> QtWidgets.QWidget:
+def _create_segmentation_pane(
+    core: AppCore, host: QtWidgets.QMainWindow
+) -> StagePaneFactoryResult:
     """Import and construct the segmentation pane lazily."""
 
     from PyQt5 import QtCore as _QtCore
 
-    from ui.segmentation import MainWindow as SegmentationMainWindow
+    from ui.segmentation import SegmentationPane
 
-    window = SegmentationMainWindow(core)
-    window.setWindowFlag(_QtCore.Qt.Widget, True)
-    return window
+    pane = SegmentationPane(core)
+    pane.attach_host_window(host)
+    docks: list[StageDock] = []
+    shortcut_dock = getattr(pane, "shortcut_dock", None)
+    if isinstance(shortcut_dock, QtWidgets.QDockWidget):
+        docks.append((shortcut_dock, _QtCore.Qt.BottomDockWidgetArea))
+    for dock, _ in docks:
+        host.removeDockWidget(dock)
+        dock.hide()
+    return StagePaneFactoryResult(pane=pane, docks=docks)
 
 
-def _create_extraction_pane(core: AppCore) -> QtWidgets.QWidget:
+def _create_extraction_pane(
+    core: AppCore, host: QtWidgets.QMainWindow
+) -> StagePaneFactoryResult:
     """Import and construct the extraction pane lazily."""
 
-    from PyQt5 import QtCore as _QtCore
+    from ui.extraction import ExtractionPane
 
-    from ui.extraction import MainWindow as ExtractionMainWindow
+    pane = ExtractionPane(core, parent=host)
+    pane.attach_host_window(host)
+    return StagePaneFactoryResult(pane=pane)
 
-    window = ExtractionMainWindow(core)
-    window.setWindowFlag(_QtCore.Qt.Widget, True)
-    return window
+
+def _create_preprocessing_window(core: AppCore) -> QtWidgets.QMainWindow:
+    from ui.preprocessing import ModuleWindow as PreprocessingWindow
+
+    return PreprocessingWindow(core)
+
+
+def _create_segmentation_window(core: AppCore) -> QtWidgets.QMainWindow:
+    from ui.segmentation import ModuleWindow as SegmentationWindow
+
+    return SegmentationWindow(core)
+
+
+def _create_extraction_window(core: AppCore) -> QtWidgets.QMainWindow:
+    from ui.extraction import ModuleWindow as ExtractionWindow
+
+    return ExtractionWindow(core)
 
 
 def launch_stage_applications(
@@ -174,8 +225,15 @@ def launch_stage_applications(
         stage_spec = spec_lookup.get(stage)
         if stage_spec is None:
             continue
-        pane = stage_spec.pane_factory(app_core)
-        window.add_stage_pane(stage, pane, stage_spec.title)
+        registration = stage_spec.pane_factory(app_core, window)
+        window.add_stage_pane(
+            stage,
+            registration.pane,
+            stage_spec.title,
+            toolbars=registration.toolbars,
+            docks=registration.docks,
+            status_message=registration.status_message,
+        )
         panes_added += 1
 
     if panes_added == 0:
@@ -202,6 +260,7 @@ def main() -> int:
 
 __all__ = [
     "StageApplicationSpec",
+    "StagePaneFactoryResult",
     "default_stage_specifications",
     "launch_stage_applications",
     "main",
