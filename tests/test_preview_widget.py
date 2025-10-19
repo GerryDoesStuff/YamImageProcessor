@@ -1,6 +1,8 @@
 import os
 import threading
 import time
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,10 +15,36 @@ QtWidgets = pytest.importorskip("PyQt5.QtWidgets", exc_type=ImportError)
 pytest.importorskip("cv2", exc_type=ImportError)
 
 from processing.pipeline_cache import PipelineCacheTileUpdate
-from ui.preprocessing import MainWindow
+from tests._preprocessing_mocks import FakeAppCore, FakePipelineCache
+from ui.preprocessing import MainWindow, ModuleWindow, PreprocessingPane
 from yam_processor.ui import PreviewWidget, TiledImageLevel, TiledImageRecord
 
 np = pytest.importorskip("numpy")
+
+
+@contextmanager
+def preprocessing_pane_host(qtbot, *, use_wrapper: bool = False):
+    cache = FakePipelineCache()
+    app_core = FakeAppCore(cache)
+    if use_wrapper:
+        host: QtWidgets.QWidget = MainWindow(app_core)
+        assert isinstance(host, ModuleWindow)
+        pane = host.pane
+        widget: QtWidgets.QWidget = host
+    else:
+        host = QtWidgets.QMainWindow()
+        pane = PreprocessingPane(app_core, host=host)
+        host.setCentralWidget(pane)
+        widget = pane
+    qtbot.addWidget(host)
+    host.show()
+    try:
+        yield SimpleNamespace(host=host, pane=pane, cache=cache, app_core=app_core, widget=widget)
+    finally:
+        pane.thread_controller.shutdown()
+        if not use_wrapper:
+            pane.teardown()
+        host.close()
 
 
 def test_preview_widget_progressive_loading(qtbot) -> None:
@@ -124,69 +152,58 @@ def test_preview_widget_zoom_persists_during_updates(qtbot) -> None:
     assert pytest.approx(widget._view.transform().m11(), rel=1e-6) == zoomed_scale
 
 
-def _make_preview_window_stub(qtbot) -> MainWindow:
-    window = MainWindow.__new__(MainWindow)
-    QtWidgets.QMainWindow.__init__(window)
-    display = PreviewWidget()
-    qtbot.addWidget(display)
-    window.preview_display = display
-    window.current_preview = None
-    window._progressive_previous_frame = None
-    window._progressive_preview_state = None
-    window._pending_preview_signature = None
-    window._active_progressive_generation = None
-    window._progressive_generation_counter = 0
-    return window
-
-
 def test_progressive_cancel_restores_large_frame(qtbot) -> None:
-    window = _make_preview_window_stub(qtbot)
-    baseline = np.full((8, 8), 20, dtype=np.uint8)
-    window.current_preview = baseline.copy()
-    window.preview_display.update_array(baseline)
-    window._progressive_previous_frame = baseline.copy()
-    window._pending_preview_signature = "sig"
-    window._active_progressive_generation = 1
+    with preprocessing_pane_host(qtbot) as ctx:
+        pane = ctx.pane
+        baseline = np.full((8, 8), 20, dtype=np.uint8)
+        pane.current_preview = baseline.copy()
+        pane.preview_display.update_array(baseline)
+        pane._progressive_previous_frame = baseline.copy()
+        pane._pending_preview_signature = "sig"
+        pane._active_progressive_generation = 1
 
-    update = PipelineCacheTileUpdate(
-        source_id="src",
-        final_signature="sig",
-        step_signature="sig",
-        step_index=1,
-        total_steps=1,
-        box=(0, 0, 4, 4),
-        tile=np.full((4, 4), 200, dtype=np.uint8),
-        shape=baseline.shape,
-        dtype=np.dtype(np.uint8),
-        tile_size=None,
-        from_cache=False,
-    )
-    window._handle_pipeline_incremental_update(update, 1)
-    qtbot.waitUntil(
-        lambda: window.preview_display._image_buffer is not None
-        and np.array_equal(window.preview_display._image_buffer[:4, :4], np.full((4, 4), 200)),
-        timeout=500,
-    )
+        update = PipelineCacheTileUpdate(
+            source_id="src",
+            final_signature="sig",
+            step_signature="sig",
+            step_index=1,
+            total_steps=1,
+            box=(0, 0, 4, 4),
+            tile=np.full((4, 4), 200, dtype=np.uint8),
+            shape=baseline.shape,
+            dtype=np.dtype(np.uint8),
+            tile_size=None,
+            from_cache=False,
+        )
+        pane._handle_pipeline_incremental_update(update, 1)
+        qtbot.waitUntil(
+            lambda: pane.preview_display._image_buffer is not None
+            and np.array_equal(
+                pane.preview_display._image_buffer[:4, :4], np.full((4, 4), 200)
+            ),
+            timeout=500,
+        )
 
-    window._restore_progressive_baseline()
-    restored = window.preview_display.current_array()
-    assert restored is not None
-    assert np.array_equal(restored, baseline)
+        pane._restore_progressive_baseline()
+        restored = pane.preview_display.current_array()
+        assert restored is not None
+        assert np.array_equal(restored, baseline)
 
 
 def test_progressive_cancel_restores_eager_frame(qtbot) -> None:
-    window = _make_preview_window_stub(qtbot)
-    baseline = np.full((4, 4, 3), 90, dtype=np.uint8)
-    window.current_preview = baseline.copy()
-    window.preview_display.update_array(baseline)
-    window._progressive_previous_frame = baseline.copy()
+    with preprocessing_pane_host(qtbot) as ctx:
+        pane = ctx.pane
+        baseline = np.full((4, 4, 3), 90, dtype=np.uint8)
+        pane.current_preview = baseline.copy()
+        pane.preview_display.update_array(baseline)
+        pane._progressive_previous_frame = baseline.copy()
 
-    window.preview_display.update_array(np.full((4, 4, 3), 10, dtype=np.uint8))
-    window._restore_progressive_baseline()
+        pane.preview_display.update_array(np.full((4, 4, 3), 10, dtype=np.uint8))
+        pane._restore_progressive_baseline()
 
-    restored = window.preview_display.current_array()
-    assert restored is not None
-    assert np.array_equal(restored, baseline)
+        restored = pane.preview_display.current_array()
+        assert restored is not None
+        assert np.array_equal(restored, baseline)
 
 
 def test_preview_widget_remains_responsive_with_large_sources(qtbot) -> None:
