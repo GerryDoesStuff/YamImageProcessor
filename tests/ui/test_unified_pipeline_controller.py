@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -170,6 +171,82 @@ if QtCore is not None:
         assert live_pre_steps[0].params["gain"] == 5
 
         assert pipeline_manager.steps[0].params["gain"] == 5
+
+    def test_run_enabled_stages_caches_results(
+        qapp: QtWidgets.QApplication,
+    ) -> None:
+        base_image = np.array([[1, 2], [3, 4]], dtype=np.float32)
+
+        observed_inputs: Dict[str, np.ndarray] = {}
+
+        def _pre(image, **kwargs):
+            observed_inputs["pre"] = np.array(image, copy=True)
+            return image + 1
+
+        def _seg(image, **kwargs):
+            observed_inputs["seg"] = np.array(image, copy=True)
+            return image * 2
+
+        def _extract(image, **kwargs):
+            observed_inputs["extract"] = np.array(image, copy=True)
+            return image - 3
+
+        manager = PipelineManager(
+            [
+                PipelineStep(
+                    name="preprocess",
+                    function=_pre,
+                    stage=ModuleStage.PREPROCESSING,
+                ),
+                PipelineStep(
+                    name="segment",
+                    function=_seg,
+                    stage=ModuleStage.SEGMENTATION,
+                ),
+                PipelineStep(
+                    name="extract",
+                    function=_extract,
+                    stage=ModuleStage.ANALYSIS,
+                ),
+            ]
+        )
+        controller = UnifiedPipelineController(_StubAppCore(manager))
+
+        results = controller.run_enabled_stages(base_image)
+
+        np.testing.assert_array_equal(observed_inputs["pre"], base_image)
+        np.testing.assert_array_equal(observed_inputs["seg"], base_image + 1)
+        np.testing.assert_array_equal(
+            observed_inputs["extract"], (base_image + 1) * 2
+        )
+
+        pre_result = controller.cached_stage_result(ModuleStage.PREPROCESSING)
+        seg_result = controller.cached_stage_result(ModuleStage.SEGMENTATION)
+        extract_result = controller.cached_stage_result(ModuleStage.ANALYSIS)
+
+        assert pre_result is not None
+        assert seg_result is not None
+        assert extract_result is not None
+
+        np.testing.assert_array_equal(pre_result, base_image + 1)
+        np.testing.assert_array_equal(seg_result, (base_image + 1) * 2)
+        np.testing.assert_array_equal(extract_result, ((base_image + 1) * 2) - 3)
+
+        expected_dependencies = {
+            ModuleStage.PREPROCESSING: (),
+            ModuleStage.SEGMENTATION: (ModuleStage.PREPROCESSING,),
+            ModuleStage.ANALYSIS: (
+                ModuleStage.PREPROCESSING,
+                ModuleStage.SEGMENTATION,
+            ),
+        }
+        for stage, deps in expected_dependencies.items():
+            assert controller.stage_dependencies(stage) == deps
+
+        cached_results = controller.cached_stage_results()
+        assert cached_results.keys() == expected_dependencies.keys()
+        for stage, result in cached_results.items():
+            np.testing.assert_array_equal(result, results[stage])
 
 else:  # pragma: no cover - executed only when Qt bindings missing
 
