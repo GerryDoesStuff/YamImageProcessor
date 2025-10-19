@@ -24,6 +24,7 @@ from processing.segmentation_pipeline import (
     build_segmentation_pipeline_from_dict,
     get_settings_snapshot,
 )
+from ui import ModulePane
 from ui.control_metadata import ControlMetadata, ControlValueType, get_control_metadata
 from ui.theme import (
     SectionWidget,
@@ -968,18 +969,15 @@ def process_segmentation_file(
 # 9. MAIN WINDOW
 #####################################
 
-class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, app_core: AppCore):
-        super().__init__()
+class SegmentationPane(ModulePane):
+    def __init__(
+        self, app_core: AppCore, parent: Optional[QtWidgets.QWidget] = None
+    ) -> None:
+        super().__init__(parent)
         self.app_core = app_core
-        self.setWindowTitle("Image Segmentation Module")
-        self.resize(1200, 700)
-        window_icon = load_icon(
-            "manage_modules",
-            fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon),
-        )
-        if not window_icon.isNull():
-            self.setWindowIcon(window_icon)
+        self._host_window: Optional[QtWidgets.QMainWindow] = None
+        self.setObjectName("segmentationPane")
+
         self.original_image: Optional[np.ndarray] = None
         self.segmentation_image: Optional[np.ndarray] = None
         self.base_image: Optional[np.ndarray] = None
@@ -988,26 +986,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self.redo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.current_preview: Optional[np.ndarray] = None
         self.current_image_path: Optional[str] = None
+
         self.settings_manager = self.app_core.settings
         self.settings = self.settings_manager.backend
-        # Set default segmentation parameters if missing.
         if not self.settings.contains("segmentation/Global/threshold"):
             self.settings.setValue("segmentation/Global/threshold", 127)
-        # Disable all segmentation functions by default.
-        for m in ["Global","Otsu","Adaptive","Edge","Watershed","Sobel","Prewitt",
-                  "Laplacian","Region Growing","Region Splitting/Merging","K-Means",
-                  "Fuzzy C-Means","Mean Shift","GMM","Graph Cuts","Active Contour",
-                  "Opening","Closing","Dilation","Erosion","Border Removal"]:
+        for m in [
+            "Global",
+            "Otsu",
+            "Adaptive",
+            "Edge",
+            "Watershed",
+            "Sobel",
+            "Prewitt",
+            "Laplacian",
+            "Region Growing",
+            "Region Splitting/Merging",
+            "K-Means",
+            "Fuzzy C-Means",
+            "Mean Shift",
+            "GMM",
+            "Graph Cuts",
+            "Active Contour",
+            "Opening",
+            "Closing",
+            "Dilation",
+            "Erosion",
+            "Border Removal",
+        ]:
             self.settings.setValue(f"segmentation/{m}/enabled", False)
         self.settings.setValue("segmentation/order", "")
         self.order_manager = PipelineOrderManager(self.settings)
 
-        central_widget = QtWidgets.QWidget(self)
-        central_layout = QtWidgets.QVBoxLayout(central_widget)
+        central_layout = QtWidgets.QVBoxLayout(self)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(6)
 
-        self.image_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal, central_widget)
+        self.image_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal, self)
         self.image_splitter.setObjectName("segmentationImageSplitter")
 
         original_section = SectionWidget("Original Image", self.image_splitter)
@@ -1046,7 +1061,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         central_layout.addWidget(self.image_splitter, 1)
 
-        pipeline_section = SectionWidget("Pipeline Summary", central_widget)
+        pipeline_section = SectionWidget("Pipeline Summary", self)
         pipeline_section.setObjectName("segmentationPipelineSection")
         pipeline_layout = pipeline_section.layout
         self.pipeline_label = QtWidgets.QLabel("Current Pipeline: (none)")
@@ -1059,45 +1074,11 @@ class MainWindow(QtWidgets.QMainWindow):
         pipeline_layout.addWidget(self.pipeline_label)
         central_layout.addWidget(pipeline_section)
 
-        self.setCentralWidget(central_widget)
-
-        shortcut_container = SectionWidget("Keyboard Shortcuts", self)
-        shortcut_container.setObjectName("segmentationShortcutSection")
-        shortcut_layout = shortcut_container.layout
         self.shortcut_summary = ShortcutSummaryWidget()
-        shortcut_layout.addWidget(self.shortcut_summary)
-
-        self.shortcut_dock = ThemedDockWidget("Workflow Shortcuts", self)
-        self.shortcut_dock.setObjectName("segmentationShortcutDock")
-        self.shortcut_dock.setWidget(shortcut_container)
-        self.shortcut_dock.setAllowedAreas(
-            QtCore.Qt.BottomDockWidgetArea
-            | QtCore.Qt.LeftDockWidgetArea
-            | QtCore.Qt.RightDockWidgetArea
-        )
-        self.shortcut_dock.setToolTip("Keyboard shortcut overview (Ctrl+/)")
-        self.shortcut_dock.setWhatsThis(
-            "Dockable panel describing available keyboard shortcuts and accelerators."
-        )
-        self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.shortcut_dock)
-        self.shortcut_dock.visibilityChanged.connect(
-            lambda visible: self.show_shortcut_dock_action.setChecked(visible)
-            if hasattr(self, "show_shortcut_dock_action")
-            else None
-        )
-
-        self.shortcut_status_label = QtWidgets.QLabel()
-        self.shortcut_status_label.setObjectName("segmentationShortcutStatus")
-        self.shortcut_status_label.setAccessibleName(
-            "Primary segmentation keyboard shortcuts"
-        )
-        self.statusBar().addPermanentWidget(self.shortcut_status_label, 1)
-
-        self.shortcut_registry = ShortcutRegistry(
-            summary_widget=self.shortcut_summary,
-            status_label=self.shortcut_status_label,
-            parent=self,
-        )
+        self.shortcut_summary.setObjectName("segmentationShortcutSummary")
+        self.shortcut_registry: Optional[ShortcutRegistry] = None
+        self.shortcut_status_label: Optional[QtWidgets.QLabel] = None
+        self.shortcut_dock: Optional[ThemedDockWidget] = None
 
         self._focus_original_shortcut = QtWidgets.QShortcut(
             QtGui.QKeySequence("Ctrl+1"), self
@@ -1125,17 +1106,118 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda: self.shortcut_summary.setFocus(QtCore.Qt.ShortcutFocusReason)
         )
 
-        self.statusBar().showMessage("Ready")
-        self.build_menu()
         self.undo_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Z"), self)
         self.undo_shortcut.activated.connect(self.undo)
         self.redo_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Y"), self)
         self.redo_shortcut.activated.connect(self.redo)
-        self._register_static_shortcuts()
+
         self.pipeline = build_segmentation_pipeline(self.app_core)
         self.update_pipeline_label()
         if self.base_image is not None:
             self.update_preview()
+
+    def attach_host_window(self, window: QtWidgets.QMainWindow) -> None:
+        """Attach the pane to a hosting :class:`QMainWindow`."""
+
+        if self._host_window is window:
+            return
+
+        self._host_window = window
+        window.setCentralWidget(self)
+        window.resize(1200, 700)
+        window.setWindowTitle("Image Segmentation Module")
+        icon = load_icon(
+            "manage_modules",
+            fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon),
+        )
+        if not icon.isNull():
+            window.setWindowIcon(icon)
+
+        shortcut_container = SectionWidget("Keyboard Shortcuts", window)
+        shortcut_container.setObjectName("segmentationShortcutSection")
+        shortcut_layout = shortcut_container.layout
+        shortcut_layout.addWidget(self.shortcut_summary)
+        self.shortcut_dock = ThemedDockWidget("Workflow Shortcuts", window)
+        self.shortcut_dock.setObjectName("segmentationShortcutDock")
+        self.shortcut_dock.setWidget(shortcut_container)
+        self.shortcut_dock.setAllowedAreas(
+            QtCore.Qt.BottomDockWidgetArea
+            | QtCore.Qt.LeftDockWidgetArea
+            | QtCore.Qt.RightDockWidgetArea
+        )
+        self.shortcut_dock.setToolTip("Keyboard shortcut overview (Ctrl+/)")
+        self.shortcut_dock.setWhatsThis(
+            "Dockable panel describing available keyboard shortcuts and accelerators."
+        )
+        window.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.shortcut_dock)
+        self.shortcut_dock.visibilityChanged.connect(
+            lambda visible: self.show_shortcut_dock_action.setChecked(visible)
+            if hasattr(self, "show_shortcut_dock_action")
+            else None
+        )
+
+        if self.shortcut_status_label is None:
+            self.shortcut_status_label = QtWidgets.QLabel()
+            self.shortcut_status_label.setObjectName("segmentationShortcutStatus")
+            self.shortcut_status_label.setAccessibleName(
+                "Primary segmentation keyboard shortcuts"
+            )
+        window.statusBar().addPermanentWidget(self.shortcut_status_label, 1)
+
+        self.shortcut_registry = ShortcutRegistry(
+            summary_widget=self.shortcut_summary,
+            status_label=self.shortcut_status_label,
+            parent=self,
+        )
+
+        self.build_menu()
+        self._register_static_shortcuts()
+        self._show_status_message("Ready")
+
+    def _host(self) -> Optional[QtWidgets.QMainWindow]:
+        return self._host_window
+
+    def menuBar(self) -> QtWidgets.QMenuBar:
+        if self._host_window is None:
+            raise RuntimeError("SegmentationPane is not attached to a host window")
+        return self._host_window.menuBar()
+
+    def statusBar(self) -> QtWidgets.QStatusBar:
+        if self._host_window is None:
+            raise RuntimeError("SegmentationPane is not attached to a host window")
+        return self._host_window.statusBar()
+
+    def _show_status_message(self, message: str, timeout: int = 0) -> None:
+        if self._host_window is not None:
+            self._host_window.statusBar().showMessage(message, timeout)
+
+    def _register_action(self, description: str, action: QtWidgets.QAction) -> None:
+        if self.shortcut_registry is not None:
+            self.shortcut_registry.register_action(description, action)
+
+    # ModulePane interface -------------------------------------------------
+
+    def on_activated(self) -> None:
+        self.update_pipeline_label()
+        self._show_status_message("Ready")
+
+    def on_deactivated(self) -> None:  # pragma: no cover - no-op hook
+        pass
+
+    def save_outputs(self) -> None:
+        self.save_segmented_image()
+
+    def update_pipeline_summary(self) -> None:
+        self.update_pipeline_label()
+
+    def set_diagnostics_visible(self, visible: bool) -> None:
+        if self.shortcut_dock is not None:
+            self.shortcut_dock.setVisible(visible)
+        if hasattr(self, "show_shortcut_dock_action"):
+            self.show_shortcut_dock_action.setChecked(visible)
+
+    def teardown(self) -> None:  # pragma: no cover - hook for future cleanup
+        pass
 
     def update_pipeline_label(self):
         order = self.order_manager.get_order()
@@ -1191,10 +1273,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.redo_action.setEnabled(len(self.redo_stack) > 0)
 
     def build_menu(self):
+        if self._host_window is None:
+            return
+
         menubar = self.menuBar()
         menubar.clear()
 
-        if hasattr(self, "shortcut_registry"):
+        if self.shortcut_registry is not None:
             self.shortcut_registry.reset()
 
         # File Menu
@@ -1212,7 +1297,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.load_image_action.setStatusTip("Load an image for segmentation")
         self.load_image_action.triggered.connect(self.load_image)
         file_menu.addAction(self.load_image_action)
-        self.shortcut_registry.register_action("Load image", self.load_image_action)
+        self._register_action("Load image", self.load_image_action)
 
         self.save_image_action = QtWidgets.QAction("&Save Segmented Image...", self)
         self.save_image_action.setShortcut(QtGui.QKeySequence.Save)
@@ -1226,9 +1311,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_image_action.setStatusTip("Save the current segmentation result")
         self.save_image_action.triggered.connect(self.save_segmented_image)
         file_menu.addAction(self.save_image_action)
-        self.shortcut_registry.register_action(
-            "Save segmented image", self.save_image_action
-        )
+        self._register_action("Save segmented image", self.save_image_action)
 
         self.mass_process_action = QtWidgets.QAction("Mass Process &Folder...", self)
         self.mass_process_action.setShortcut("Ctrl+Shift+M")
@@ -1244,9 +1327,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.mass_process_action.triggered.connect(self.mass_process)
         file_menu.addAction(self.mass_process_action)
-        self.shortcut_registry.register_action(
-            "Mass process folder", self.mass_process_action
-        )
+        self._register_action("Mass process folder", self.mass_process_action)
 
         self.import_settings_action = QtWidgets.QAction(
             "&Import Segmentation Settings...", self
@@ -1264,7 +1345,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.import_settings_action.triggered.connect(self.import_pipeline)
         file_menu.addAction(self.import_settings_action)
-        self.shortcut_registry.register_action(
+        self._register_action(
             "Import segmentation settings", self.import_settings_action
         )
 
@@ -1284,7 +1365,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.export_settings_action.triggered.connect(self.export_pipeline)
         file_menu.addAction(self.export_settings_action)
-        self.shortcut_registry.register_action(
+        self._register_action(
             "Export segmentation settings", self.export_settings_action
         )
 
@@ -1304,7 +1385,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_action.triggered.connect(self.undo)
         self.undo_action.setEnabled(False)
         edit_menu.addAction(self.undo_action)
-        self.shortcut_registry.register_action("Undo", self.undo_action)
+        self._register_action("Undo", self.undo_action)
 
         self.redo_action = QtWidgets.QAction("Redo", self)
         self.redo_action.setShortcut(QtGui.QKeySequence.Redo)
@@ -1319,7 +1400,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.redo_action.triggered.connect(self.redo)
         self.redo_action.setEnabled(False)
         edit_menu.addAction(self.redo_action)
-        self.shortcut_registry.register_action("Redo", self.redo_action)
+        self._register_action("Redo", self.redo_action)
 
         self.reset_action = QtWidgets.QAction("Reset &All", self)
         self.reset_action.setShortcut("Ctrl+Shift+R")
@@ -1333,7 +1414,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reset_action.setStatusTip("Restore segmentation settings to defaults")
         self.reset_action.triggered.connect(self.reset_all)
         edit_menu.addAction(self.reset_action)
-        self.shortcut_registry.register_action("Reset segmentation", self.reset_action)
+        self._register_action("Reset segmentation", self.reset_action)
 
         view_menu = menubar.addMenu("View")
         self.show_shortcut_dock_action = QtWidgets.QAction(
@@ -1347,7 +1428,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.show_shortcut_dock_action.toggled.connect(self.shortcut_dock.setVisible)
         view_menu.addAction(self.show_shortcut_dock_action)
-        self.shortcut_registry.register_action(
+        self._register_action(
             "Toggle shortcut overview", self.show_shortcut_dock_action
         )
         # Segmentation Menu (Tree Structure)
@@ -1429,7 +1510,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._register_static_shortcuts()
 
     def _register_static_shortcuts(self) -> None:
-        if not hasattr(self, "shortcut_registry"):
+        if self.shortcut_registry is None:
             return
         mapping = (
             ("Focus original image", "_focus_original_shortcut"),
@@ -1460,7 +1541,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_stack.clear()
         self.redo_stack.clear()
         self.update_undo_redo_actions()
-        self.statusBar().showMessage("Reset to original settings.")
+        self._show_status_message("Reset to original settings.")
 
     def preview_update(self, func_name: str, new_params: Dict[str, Any]):
         temp_dict = get_settings_snapshot(self.settings_manager)
@@ -2069,7 +2150,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.undo_stack.clear()
             self.redo_stack.clear()
             self.update_undo_redo_actions()
-            self.statusBar().showMessage("Image loaded.")
+            self._show_status_message("Image loaded.")
             for m in [
                 "Global",
                 "Otsu",
@@ -2323,20 +2404,49 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
 #####################################
+# 9b. MODULE WINDOW WRAPPER
+#####################################
+
+
+class ModuleWindow(QtWidgets.QMainWindow):
+    """Lightweight wrapper hosting :class:`SegmentationPane`."""
+
+    def __init__(
+        self, app_core: AppCore, parent: Optional[QtWidgets.QWidget] = None
+    ) -> None:
+        super().__init__(parent)
+        self.pane = SegmentationPane(app_core, parent=self)
+        self.statusBar()  # ensure status bar exists before attaching widgets
+        self.pane.attach_host_window(self)
+
+    def __getattr__(self, item: str) -> Any:
+        try:
+            return getattr(self.pane, item)
+        except AttributeError as exc:  # pragma: no cover - defensive delegation
+            raise exc
+
+
+MainWindow = ModuleWindow
+
+#####################################
 # 10. MAIN ENTRY POINT
 #####################################
 
+
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    window = MainWindow()
+    app_core = AppCore()
+    app_core.bootstrap()
+    window = MainWindow(app_core)
     window.show()
     try:
         sys.exit(app.exec_())
     except Exception:
         logging.exception("Application encountered an error.")
 
+
 if __name__ == "__main__":
     main()
 
 
-__all__ = ["MainWindow", "PipelineOrderManager", "ImageDisplayWidget"]
+__all__ = ["MainWindow", "ModuleWindow", "PipelineOrderManager", "ImageDisplayWidget", "SegmentationPane"]
