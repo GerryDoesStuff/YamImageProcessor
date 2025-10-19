@@ -40,7 +40,11 @@ class UnifiedMainWindow(QtWidgets.QMainWindow):
         super().__init__(parent)
         self.app_core = app_core
         self.setObjectName("unifiedMainWindow")
-        self.setWindowTitle(self.tr("Yam Image Processor"))
+        canonical_title = self.tr("Yam Image Processor")
+        self.setWindowTitle(canonical_title)
+        self._canonical_title = canonical_title
+        self._canonical_icon = QtGui.QIcon(self.windowIcon())
+        self.setProperty("isUnifiedShell", True)
         self.resize(1400, 900)
 
         self._tab_widget = QtWidgets.QTabWidget(self)
@@ -91,6 +95,11 @@ class UnifiedMainWindow(QtWidgets.QMainWindow):
         self._diagnostics_panel.attach_to_logger(logging.getLogger())
         if self.app_core.thread_controller is not None:
             self._diagnostics_panel.set_thread_controller(self.app_core.thread_controller)
+
+    def is_unified_shell(self) -> bool:
+        """Return ``True`` to advertise unified shell hosting capabilities."""
+
+        return True
 
     # ------------------------------------------------------------------
     # Stage registration helpers
@@ -257,6 +266,7 @@ class UnifiedMainWindow(QtWidgets.QMainWindow):
                 "Error while activating stage %s", stage
             )
         self._notify_diagnostics_visibility(self._diagnostics_dock.isVisible())
+        self._restore_window_chrome()
 
     def _apply_stage_status(self, stage: ModuleStage) -> None:
         registration = self._get_registration(stage)
@@ -297,6 +307,14 @@ class UnifiedMainWindow(QtWidgets.QMainWindow):
             logging.getLogger(__name__).exception(
                 "Error updating diagnostics visibility for %s", pane.objectName()
             )
+
+    def _restore_window_chrome(self) -> None:
+        """Reinstate the canonical title and icon for the unified shell."""
+
+        if self.windowTitle() != self._canonical_title:
+            self.setWindowTitle(self._canonical_title)
+        if self.windowIcon().cacheKey() != self._canonical_icon.cacheKey():
+            self.setWindowIcon(self._canonical_icon)
 
     def _coerce_module_pane(self, widget: QtWidgets.QWidget) -> ModulePane:
         if not isinstance(widget, QtWidgets.QWidget):

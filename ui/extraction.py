@@ -49,6 +49,26 @@ def _build_extraction_pipeline_metadata(settings: Mapping[str, Any]) -> Dict[str
 LOGGER = logging.getLogger(__name__)
 
 
+def _is_unified_shell(window: Optional[QtWidgets.QWidget]) -> bool:
+    """Return ``True`` when ``window`` hosts the unified multi-stage shell."""
+
+    if window is None:
+        return False
+
+    capability = getattr(window, "is_unified_shell", None)
+    if callable(capability):
+        try:
+            return bool(capability())
+        except Exception:  # pragma: no cover - defensive probing
+            return False
+
+    property_value = window.property("isUnifiedShell")
+    if isinstance(property_value, bool):
+        return property_value
+
+    return False
+
+
 try:
     import pyperclip
 except ImportError:  # pragma: no cover - optional dependency
@@ -610,8 +630,10 @@ class ExtractionPane(ModulePane):
 
         self._host_window = window
         window.setCentralWidget(self)
-        window.resize(1200, 700)
-        window.setWindowTitle("Microscopic Feature Extraction")
+        unified_shell = _is_unified_shell(window)
+        if not unified_shell:
+            window.resize(1200, 700)
+            window.setWindowTitle("Microscopic Feature Extraction")
         self.build_menu()
 
         if self._pending_status_message is not None:

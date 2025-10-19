@@ -41,6 +41,26 @@ from yam_processor.ui.error_reporter import ErrorResolution, present_error_repor
 LOGGER = logging.getLogger(__name__)
 
 
+def _is_unified_shell(window: Optional[QtWidgets.QWidget]) -> bool:
+    """Return ``True`` when ``window`` hosts the unified multi-stage shell."""
+
+    if window is None:
+        return False
+
+    capability = getattr(window, "is_unified_shell", None)
+    if callable(capability):
+        try:
+            return bool(capability())
+        except Exception:  # pragma: no cover - defensive probing
+            return False
+
+    property_value = window.property("isUnifiedShell")
+    if isinstance(property_value, bool):
+        return property_value
+
+    return False
+
+
 def _apply_common_metadata(widget: QtWidgets.QWidget, metadata: Optional[ControlMetadata]) -> None:
     if metadata is None:
         return
@@ -1124,14 +1144,16 @@ class SegmentationPane(ModulePane):
 
         self._host_window = window
         window.setCentralWidget(self)
-        window.resize(1200, 700)
-        window.setWindowTitle("Image Segmentation Module")
-        icon = load_icon(
-            "manage_modules",
-            fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon),
-        )
-        if not icon.isNull():
-            window.setWindowIcon(icon)
+        unified_shell = _is_unified_shell(window)
+        if not unified_shell:
+            window.resize(1200, 700)
+            window.setWindowTitle("Image Segmentation Module")
+            icon = load_icon(
+                "manage_modules",
+                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon),
+            )
+            if not icon.isNull():
+                window.setWindowIcon(icon)
 
         shortcut_container = SectionWidget("Keyboard Shortcuts", window)
         shortcut_container.setObjectName("segmentationShortcutSection")

@@ -45,6 +45,26 @@ from yam_processor.ui.diagnostics_panel import DiagnosticsPanel
 LOGGER = logging.getLogger(__name__)
 
 
+def _is_unified_shell(window: Optional[QtWidgets.QWidget]) -> bool:
+    """Return ``True`` when ``window`` hosts the unified multi-stage shell."""
+
+    if window is None:
+        return False
+
+    capability = getattr(window, "is_unified_shell", None)
+    if callable(capability):
+        try:
+            return bool(capability())
+        except Exception:  # pragma: no cover - defensive probing
+            return False
+
+    property_value = window.property("isUnifiedShell")
+    if isinstance(property_value, bool):
+        return property_value
+
+    return False
+
+
 @dataclass
 class _ProgressivePreviewState:
     """Track incremental pipeline output for the progressive preview."""
@@ -602,15 +622,19 @@ class PreprocessingPane(ModulePane):
     ):
         super().__init__(host)
         self._window = host
+        unified_shell = _is_unified_shell(self._window)
         self.app_core = app_core
-        self._window.setWindowTitle("Image Pre-Processing Module")
-        self._window.resize(1200, 700)
-        window_icon = load_icon(
-            "manage_modules",
-            fallback=self._window.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon),
-        )
-        if not window_icon.isNull():
-            self._window.setWindowIcon(window_icon)
+        if not unified_shell:
+            self._window.setWindowTitle("Image Pre-Processing Module")
+            self._window.resize(1200, 700)
+            window_icon = load_icon(
+                "manage_modules",
+                fallback=self._window.style().standardIcon(
+                    QtWidgets.QStyle.SP_DesktopIcon
+                ),
+            )
+            if not window_icon.isNull():
+                self._window.setWindowIcon(window_icon)
         self.original_image: Optional[np.ndarray] = None
         self.base_image: Optional[np.ndarray] = None
         self.committed_image: Optional[np.ndarray] = None
