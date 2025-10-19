@@ -26,6 +26,7 @@ from processing.preprocessing_pipeline import (
     PreprocessingPipeline,
     build_preprocessing_pipeline,
 )
+from ui import ModulePane
 from ui.control_metadata import ControlMetadata, ControlValueType, get_control_metadata
 from ui.theme import (
     SectionWidget,
@@ -586,25 +587,30 @@ class CropDialog(QtWidgets.QDialog):
         self.height_spin.setValue(self.initial_height)
 
 
-class MainWindow(QtWidgets.QMainWindow):
+class PreprocessingPane(ModulePane):
     pipelineDockVisibilityChanged = QtCore.pyqtSignal(bool)
     moduleControlsDockVisibilityChanged = QtCore.pyqtSignal(bool)
     diagnosticsDockVisibilityChanged = QtCore.pyqtSignal(bool)
     diagnosticsLoggingToggled = QtCore.pyqtSignal(bool)
     moduleActivated = QtCore.pyqtSignal(str)
 
-    def __init__(self, app_core: AppCore):
-        super().__init__()
+    def __init__(
+        self,
+        app_core: AppCore,
+        *,
+        host: QtWidgets.QMainWindow,
+    ):
+        super().__init__(host)
+        self._window = host
         self.app_core = app_core
-        self._init_update_notifications()
-        self.setWindowTitle("Image Pre-Processing Module")
-        self.resize(1200, 700)
+        self._window.setWindowTitle("Image Pre-Processing Module")
+        self._window.resize(1200, 700)
         window_icon = load_icon(
             "manage_modules",
-            fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon),
+            fallback=self._window.style().standardIcon(QtWidgets.QStyle.SP_DesktopIcon),
         )
         if not window_icon.isNull():
-            self.setWindowIcon(window_icon)
+            self._window.setWindowIcon(window_icon)
         self.original_image: Optional[np.ndarray] = None
         self.base_image: Optional[np.ndarray] = None
         self.committed_image: Optional[np.ndarray] = None
@@ -625,7 +631,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_progressive_generation: Optional[int] = None
         self._progressive_previous_frame: Optional[np.ndarray] = None
         if self.app_core.thread_controller is None:
-            self.app_core.thread_controller = ThreadController(parent=self)
+            self.app_core.thread_controller = ThreadController(parent=self._window)
         self.thread_controller: ThreadController = self.app_core.thread_controller
         self._progress_dialog: Optional[QtWidgets.QProgressDialog] = None
         self._register_thread_signals()
@@ -636,7 +642,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.image_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal, self)
         self.image_splitter.setObjectName("imageDisplaySplitter")
-        self.setCentralWidget(self.image_splitter)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.image_splitter, 1)
 
         original_section = SectionWidget("Original Image", self.image_splitter)
         original_section.setObjectName("originalImageSection")
@@ -692,7 +700,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pipeline_layout.addWidget(self.pipeline_label)
         pipeline_layout.addWidget(self.pipeline_overview_list, 1)
 
-        self.pipeline_dock = ThemedDockWidget("Pipeline Overview", self)
+        self.pipeline_dock = ThemedDockWidget("Pipeline Overview", self._window)
         self.pipeline_dock.setObjectName("pipelineOverviewDock")
         self.pipeline_dock.setWidget(pipeline_widget)
         self.pipeline_dock.setAllowedAreas(
@@ -703,7 +711,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Dockable panel summarizing the active preprocessing pipeline."
         )
         self.pipeline_dock.setAccessibleName("Pipeline overview dock")
-        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.pipeline_dock)
+        self._window.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.pipeline_dock)
         self.pipeline_dock.visibilityChanged.connect(
             self._on_pipeline_dock_visibility_changed
         )
@@ -719,7 +727,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.diagnostics_panel.setFocusPolicy(QtCore.Qt.StrongFocus)
         diagnostics_layout.addWidget(self.diagnostics_panel, 1)
 
-        self.diagnostics_dock = ThemedDockWidget("Diagnostics Log", self)
+        self.diagnostics_dock = ThemedDockWidget("Diagnostics Log", self._window)
         self.diagnostics_dock.setObjectName("diagnosticsLogDock")
         self.diagnostics_dock.setWidget(diagnostics_widget)
         self.diagnostics_dock.setAllowedAreas(
@@ -732,7 +740,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "Dockable panel displaying diagnostic output and log messages."
         )
         self.diagnostics_dock.setAccessibleName("Diagnostics log dock")
-        self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.diagnostics_dock)
+        self._window.addDockWidget(
+            QtCore.Qt.BottomDockWidgetArea, self.diagnostics_dock
+        )
         self.diagnostics_dock.visibilityChanged.connect(
             self._on_diagnostics_dock_visibility_changed
         )
@@ -777,7 +787,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.module_controls_container.setWidget(module_controls_content)
 
         self.module_controls_dock = ThemedDockWidget(
-            "Module Parameters", self
+            "Module Parameters", self._window
         )
         self.module_controls_dock.setObjectName("moduleParametersDock")
         self.module_controls_dock.setWidget(self.module_controls_container)
@@ -789,7 +799,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "Dockable panel hosting the configuration widgets for preprocessing modules."
         )
         self.module_controls_dock.setAccessibleName("Module parameter dock")
-        self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.module_controls_dock)
+        self._window.addDockWidget(
+            QtCore.Qt.LeftDockWidgetArea, self.module_controls_dock
+        )
         self.module_controls_dock.visibilityChanged.connect(
             self._on_module_controls_dock_visibility_changed
         )
@@ -799,7 +811,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.shortcut_status_label.setAccessibleName(
             "Primary keyboard shortcuts summary"
         )
-        self.statusBar().addPermanentWidget(self.shortcut_status_label, 1)
+        self._window.statusBar().addPermanentWidget(self.shortcut_status_label, 1)
         self.shortcut_registry = ShortcutRegistry(
             summary_widget=self.shortcut_summary,
             status_label=self.shortcut_status_label,
@@ -838,7 +850,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
 
-        self.statusBar().showMessage("Ready")
+        self._show_status_message("Ready")
 
         self.build_menu()
 
@@ -853,17 +865,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.base_image is not None:
             self.update_preview()
 
-    # ------------------------------------------------------------------
-    # Update notification helpers
-    def _init_update_notifications(self) -> None:
-        self._pending_update: Optional[UpdateMetadata] = None
-        self._update_dispatcher: Optional[UpdateDispatcher] = None
-        self._update_dialog_factory: Callable[[UpdateMetadata], QtWidgets.QDialog] = (
-            lambda metadata: UpdateNotificationDialog(metadata, self)
-        )
-        dispatcher = getattr(self.app_core, "update_dispatcher", None)
-        if isinstance(dispatcher, UpdateDispatcher):
-            self.set_update_dispatcher(dispatcher)
+    def _status_bar(self) -> QtWidgets.QStatusBar:
+        return self._window.statusBar()
+
+    def _show_status_message(self, message: str, timeout: int = 0) -> None:
+        status_bar = self._status_bar()
+        if status_bar is not None:
+            status_bar.showMessage(message, timeout)
 
     def _build_preview_record(
         self, image: Optional[np.ndarray]
@@ -916,35 +924,6 @@ class MainWindow(QtWidgets.QMainWindow):
         baseline = np.array(self._progressive_previous_frame, copy=True)
         self._progressive_previous_frame = None
         self.preview_display.update_array(baseline)
-
-    def set_update_dispatcher(self, dispatcher: UpdateDispatcher) -> None:
-        if self._update_dispatcher is dispatcher:
-            return
-        if self._update_dispatcher is not None:
-            self._update_dispatcher.remove_listener(self._on_update_available)
-        self._update_dispatcher = dispatcher
-        dispatcher.add_listener(self._on_update_available)
-
-    def _on_update_available(self, metadata: UpdateMetadata) -> None:
-        self._pending_update = metadata
-        dialog = self._create_update_dialog(metadata)
-        try:
-            dialog.exec_()
-        finally:
-            self.acknowledge_available_update()
-            self._pending_update = None
-
-    def _create_update_dialog(self, metadata: UpdateMetadata) -> QtWidgets.QDialog:
-        return self._update_dialog_factory(metadata)
-
-    def acknowledge_available_update(self) -> None:
-        if self._update_dispatcher is not None:
-            self._update_dispatcher.acknowledge()
-
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
-        if self._update_dispatcher is not None:
-            self._update_dispatcher.remove_listener(self._on_update_available)
-        super().closeEvent(event)
 
     def update_pipeline_label(self):
         order = [step.name for step in self.pipeline_manager.iter_enabled_steps()]
@@ -1063,8 +1042,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_action.setEnabled(self.pipeline_manager.can_undo())
         self.redo_action.setEnabled(self.pipeline_manager.can_redo())
 
+    # ------------------------------------------------------------------
+    # ModulePane implementation
+    def on_activated(self) -> None:
+        self.update_undo_redo_actions()
+
+    def on_deactivated(self) -> None:
+        pass
+
+    def save_outputs(self) -> None:
+        self.save_processed_image()
+
+    def update_pipeline_summary(self) -> None:
+        self.update_pipeline_label()
+
+    def set_diagnostics_visible(self, visible: bool) -> None:
+        self.diagnostics_dock.setVisible(visible)
+
+    def teardown(self) -> None:
+        if hasattr(self, "diagnostics_panel") and self.diagnostics_panel is not None:
+            self.diagnostics_panel.detach_from_logger()
+        for dialog in list(self._active_parameter_dialogs.values()):
+            dialog.close()
+        self._active_parameter_dialogs.clear()
+        self._parameter_stream_sources.clear()
+
     def build_menu(self):
-        menubar = self.menuBar()
+        menubar = self._window.menuBar()
         menubar.clear()
 
         if hasattr(self, "shortcut_registry"):
@@ -1088,7 +1092,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         file_menu = ensure_menu(("File",))
 
-        self.load_image_action = QtWidgets.QAction("&Load Image...", self)
+        self.load_image_action = QtWidgets.QAction("&Load Image...", self._window)
         self.load_image_action.setShortcut(QtGui.QKeySequence.Open)
         self.load_image_action.setShortcutVisibleInContextMenu(True)
         self.load_image_action.setStatusTip("Load an image for preprocessing")
@@ -1096,14 +1100,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.load_image_action.setIcon(
             load_icon(
                 "open_project",
-                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton),
+                fallback=self._window.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton),
             )
         )
         file_menu.addAction(self.load_image_action)
         self.shortcut_registry.register_action("Load image", self.load_image_action)
 
         self.save_processed_image_action = QtWidgets.QAction(
-            "&Save Pre-Processed Image...", self
+            "&Save Pre-Processed Image...", self._window
         )
         self.save_processed_image_action.setShortcut(QtGui.QKeySequence.Save)
         self.save_processed_image_action.setShortcutVisibleInContextMenu(True)
@@ -1116,7 +1120,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_processed_image_action.setIcon(
             load_icon(
                 "save_project",
-                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton),
+                fallback=self._window.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton),
             )
         )
         file_menu.addAction(self.save_processed_image_action)
@@ -1127,7 +1131,7 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu.addSeparator()
 
         self.mass_preprocess_action = QtWidgets.QAction(
-            "Mass Pre-Process &Folder...", self
+            "Mass Pre-Process &Folder...", self._window
         )
         self.mass_preprocess_action.setShortcut("Ctrl+Shift+M")
         self.mass_preprocess_action.setShortcutVisibleInContextMenu(True)
@@ -1138,7 +1142,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mass_preprocess_action.setIcon(
             load_icon(
                 "manage_modules",
-                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView),
+                fallback=self._window.style().standardIcon(
+                    QtWidgets.QStyle.SP_FileDialogDetailedView
+                ),
             )
         )
         file_menu.addAction(self.mass_preprocess_action)
@@ -1149,7 +1155,7 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu.addSeparator()
 
         self.import_pipeline_action = QtWidgets.QAction(
-            "&Import Pipeline Settings...", self
+            "&Import Pipeline Settings...", self._window
         )
         self.import_pipeline_action.setShortcut("Ctrl+I")
         self.import_pipeline_action.setShortcutVisibleInContextMenu(True)
@@ -1160,7 +1166,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.import_pipeline_action.setIcon(
             load_icon(
                 "open_project",
-                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton),
+                fallback=self._window.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton),
             )
         )
         file_menu.addAction(self.import_pipeline_action)
@@ -1169,7 +1175,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         self.export_pipeline_action = QtWidgets.QAction(
-            "E&xport Pipeline Settings...", self
+            "E&xport Pipeline Settings...", self._window
         )
         self.export_pipeline_action.setShortcut("Ctrl+Shift+E")
         self.export_pipeline_action.setShortcutVisibleInContextMenu(True)
@@ -1180,7 +1186,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.export_pipeline_action.setIcon(
             load_icon(
                 "save_project_as",
-                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton),
+                fallback=self._window.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton),
             )
         )
         file_menu.addAction(self.export_pipeline_action)
@@ -1189,7 +1195,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         edit_menu = ensure_menu(("Edit",))
-        self.undo_action = QtWidgets.QAction("&Undo", self)
+        self.undo_action = QtWidgets.QAction("&Undo", self._window)
         self.undo_action.setShortcut(QtGui.QKeySequence.Undo)
         self.undo_action.setShortcutVisibleInContextMenu(True)
         self.undo_action.triggered.connect(self.undo)
@@ -1197,13 +1203,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_action.setIcon(
             load_icon(
                 "undo",
-                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_ArrowBack),
+                fallback=self._window.style().standardIcon(QtWidgets.QStyle.SP_ArrowBack),
             )
         )
         edit_menu.addAction(self.undo_action)
         self.shortcut_registry.register_action("Undo", self.undo_action)
 
-        self.redo_action = QtWidgets.QAction("&Redo", self)
+        self.redo_action = QtWidgets.QAction("&Redo", self._window)
         self.redo_action.setShortcut(QtGui.QKeySequence.Redo)
         self.redo_action.setShortcutVisibleInContextMenu(True)
         self.redo_action.triggered.connect(self.redo)
@@ -1211,7 +1217,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.redo_action.setIcon(
             load_icon(
                 "redo",
-                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_ArrowForward),
+                fallback=self._window.style().standardIcon(QtWidgets.QStyle.SP_ArrowForward),
             )
         )
         edit_menu.addAction(self.redo_action)
@@ -1219,7 +1225,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         edit_menu.addSeparator()
 
-        self.reset_pipeline_action = QtWidgets.QAction("Reset &All", self)
+        self.reset_pipeline_action = QtWidgets.QAction("Reset &All", self._window)
         self.reset_pipeline_action.setShortcut("Ctrl+Shift+R")
         self.reset_pipeline_action.setShortcutVisibleInContextMenu(True)
         self.reset_pipeline_action.setStatusTip(
@@ -1229,7 +1235,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reset_pipeline_action.setIcon(
             load_icon(
                 "redo",
-                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload),
+                fallback=self._window.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload),
             )
         )
         edit_menu.addAction(self.reset_pipeline_action)
@@ -1240,7 +1246,7 @@ class MainWindow(QtWidgets.QMainWindow):
         view_menu = ensure_menu(("View",))
 
         self.show_pipeline_dock_action = QtWidgets.QAction(
-            "Pipeline Overview", self
+            "Pipeline Overview", self._window
         )
         self.show_pipeline_dock_action.setCheckable(True)
         self.show_pipeline_dock_action.setChecked(self.pipeline_dock.isVisible())
@@ -1254,7 +1260,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_pipeline_dock_action.setIcon(
             load_icon(
                 "manage_modules",
-                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogListView),
+                fallback=self._window.style().standardIcon(QtWidgets.QStyle.SP_FileDialogListView),
             )
         )
         view_menu.addAction(self.show_pipeline_dock_action)
@@ -1263,7 +1269,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         self.show_diagnostics_dock_action = QtWidgets.QAction(
-            "Diagnostics Log", self
+            "Diagnostics Log", self._window
         )
         self.show_diagnostics_dock_action.setCheckable(True)
         self.show_diagnostics_dock_action.setChecked(
@@ -1279,7 +1285,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_diagnostics_dock_action.setIcon(
             load_icon(
                 "documentation",
-                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView),
+                fallback=self._window.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView),
             )
         )
         view_menu.addAction(self.show_diagnostics_dock_action)
@@ -1288,7 +1294,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         self.show_module_controls_dock_action = QtWidgets.QAction(
-            "Module Controls", self
+            "Module Controls", self._window
         )
         self.show_module_controls_dock_action.setCheckable(True)
         self.show_module_controls_dock_action.setChecked(
@@ -1304,7 +1310,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_module_controls_dock_action.setIcon(
             load_icon(
                 "manage_modules",
-                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView),
+                fallback=self._window.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView),
             )
         )
         view_menu.addAction(self.show_module_controls_dock_action)
@@ -1315,7 +1321,7 @@ class MainWindow(QtWidgets.QMainWindow):
         view_menu.addSeparator()
 
         self.enable_diagnostics_logging_action = QtWidgets.QAction(
-            "Enable Diagnostics Logging", self
+            "Enable Diagnostics Logging", self._window
         )
         self.enable_diagnostics_logging_action.setCheckable(True)
         self.enable_diagnostics_logging_action.setChecked(
@@ -1330,7 +1336,7 @@ class MainWindow(QtWidgets.QMainWindow):
         view_menu.addAction(self.enable_diagnostics_logging_action)
 
         self.enable_telemetry_action = QtWidgets.QAction(
-            "Share Anonymous Telemetry", self
+            "Share Anonymous Telemetry", self._window
         )
         self.enable_telemetry_action.setCheckable(True)
         self.enable_telemetry_action.setChecked(self.app_core.telemetry_opt_in)
@@ -1349,7 +1355,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if not path or path[0] != "Modules":
                     path = ("Modules", *path)
                 menu = ensure_menu(path)
-                action = QtWidgets.QAction(entry.text, self)
+                action = QtWidgets.QAction(entry.text, self._window)
                 action.setObjectName(
                     f"moduleAction_{module.metadata.identifier}_{'_'.join(entry.path)}"
                 )
@@ -1370,7 +1376,7 @@ class MainWindow(QtWidgets.QMainWindow):
         help_menu = ensure_menu(("Help",))
 
         self.view_documentation_action = QtWidgets.QAction(
-            "View &Documentation", self
+            "View &Documentation", self._window
         )
         self.view_documentation_action.setShortcut(
             QtGui.QKeySequence.HelpContents
@@ -1382,7 +1388,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view_documentation_action.setIcon(
             load_icon(
                 "documentation",
-                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_DialogHelpButton),
+                fallback=self._window.style().standardIcon(QtWidgets.QStyle.SP_DialogHelpButton),
             )
         )
         help_menu.addAction(self.view_documentation_action)
@@ -1390,7 +1396,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "View documentation", self.view_documentation_action
         )
 
-        self.about_action = QtWidgets.QAction("&About", self)
+        self.about_action = QtWidgets.QAction("&About", self._window)
         self.about_action.setStatusTip("Show application information")
         self.about_action.triggered.connect(
             lambda: QtWidgets.QMessageBox.information(
@@ -1402,7 +1408,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.about_action.setIcon(
             load_icon(
                 "about",
-                fallback=self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView),
+                fallback=self._window.style().standardIcon(
+                    QtWidgets.QStyle.SP_FileDialogInfoView
+                ),
             )
         )
         help_menu.addAction(self.about_action)
@@ -1542,7 +1550,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Module %s does not implement an activation handler",
                 identifier,
             )
-            self.statusBar().showMessage(
+            self._show_status_message(
                 f"{module.metadata.title} is not available for activation.", 2000
             )
         except Exception as exc:  # pragma: no cover - defensive UI guard
@@ -1563,7 +1571,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 retry_label=self.tr("&Retry Activation"),
                 retry_callback=lambda: self._activate_module(module),
             )
-            self.statusBar().showMessage("Error running module action", 4000)
+            self._show_status_message("Error running module action", 4000)
 
     def _register_thread_signals(self) -> None:
         self._current_task_description: str = ""
@@ -1648,7 +1656,7 @@ class MainWindow(QtWidgets.QMainWindow):
             else "Diagnostics logging disabled."
         )
         LOGGER.info(message)
-        self.statusBar().showMessage(message, 3000)
+        self._show_status_message(message, 3000)
         self.diagnosticsLoggingToggled.emit(enabled)
 
     def _set_telemetry_opt_in(self, opt_in: bool) -> None:
@@ -1684,7 +1692,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if candidate.exists():
                 url = QtCore.QUrl.fromLocalFile(str(candidate))
                 QtGui.QDesktopServices.openUrl(url)
-                self.statusBar().showMessage(
+                self._show_status_message(
                     f"Opened documentation: {candidate.name}", 3000
                 )
                 return
@@ -1697,7 +1705,7 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.pyqtSlot(str)
     def _on_task_started(self, description: str) -> None:
         self._current_task_description = description or "Processing"
-        self.statusBar().showMessage(self._current_task_description)
+        self._show_status_message(self._current_task_description)
         self._task_counter += 1
         task_id = f"task::{self._task_counter}"
         self._active_task_id = task_id
@@ -1724,7 +1732,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._progress_dialog is not None:
             self._progress_dialog.reset()
             self._progress_dialog = None
-        self.statusBar().showMessage("Ready", 1500)
+        self._show_status_message("Ready", 1500)
         if self.diagnostics_panel is not None and self._active_task_id is not None:
             self.diagnostics_panel.complete_task(self._active_task_id)
         LOGGER.info(
@@ -1738,7 +1746,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._progress_dialog is not None:
             self._progress_dialog.reset()
             self._progress_dialog = None
-        self.statusBar().showMessage("Operation canceled", 2000)
+        self._show_status_message("Operation canceled", 2000)
         if self.diagnostics_panel is not None and self._active_task_id is not None:
             self.diagnostics_panel.update_task_status(
                 self._active_task_id, self.tr("Canceled")
@@ -1778,7 +1786,7 @@ class MainWindow(QtWidgets.QMainWindow):
             window_title=self.tr("Processing Error"),
             fallback_traceback=stack,
         )
-        self.statusBar().showMessage("Error during processing", 4000)
+        self._show_status_message("Error during processing", 4000)
         LOGGER.error(
             "%s failed: %s",
             self._current_task_description or "Processing",
@@ -1988,7 +1996,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_reset_completed(self, result: PipelineCacheResult) -> None:
         self._update_committed_from_result(result)
-        self.statusBar().showMessage("Reset all processing to defaults.", 3000)
+        self._show_status_message("Reset all processing to defaults.", 3000)
 
     def mass_preprocess(self):
         raw_folder = QtWidgets.QFileDialog.getExistingDirectory(
@@ -2237,7 +2245,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.update_preview()
             self.pipeline_manager.clear_history()
             self.update_undo_redo_actions()
-            self.statusBar().showMessage(f"Loaded image: {path}")
+            self._show_status_message(f"Loaded image: {path}")
 
         try:
             _attempt_load()
@@ -2296,7 +2304,9 @@ class MainWindow(QtWidgets.QMainWindow):
             pipeline=pipeline_metadata,
             settings_snapshot=settings_snapshot,
         )
-        self.statusBar().showMessage(f"Saved processed image to: {result.image_path}")
+        self._show_status_message(
+            f"Saved processed image to: {result.image_path}"
+        )
 
     def update_preview(self):
         if self.base_image is None or self._source_id is None or self.pipeline is None:
@@ -2660,14 +2670,117 @@ class MainWindow(QtWidgets.QMainWindow):
             on_parameters_changed=_preview,
         )
 
-    def closeEvent(self, event):  # pragma: no cover - Qt virtual
-        if hasattr(self, "diagnostics_panel") and self.diagnostics_panel is not None:
-            self.diagnostics_panel.detach_from_logger()
-        super().closeEvent(event)
-
     def showEvent(self, event):  # pragma: no cover - Qt virtual
         super().showEvent(event)
         self.update_undo_redo_actions()
+
+
+
+class ModuleWindow(QtWidgets.QMainWindow):
+    pipelineDockVisibilityChanged = QtCore.pyqtSignal(bool)
+    moduleControlsDockVisibilityChanged = QtCore.pyqtSignal(bool)
+    diagnosticsDockVisibilityChanged = QtCore.pyqtSignal(bool)
+    diagnosticsLoggingToggled = QtCore.pyqtSignal(bool)
+    moduleActivated = QtCore.pyqtSignal(str)
+
+    def __init__(self, app_core: AppCore):
+        super().__init__()
+        self.setObjectName("preprocessingMainWindow")
+        self.app_core = app_core
+        self._init_update_notifications()
+        self.pane = PreprocessingPane(app_core, host=self)
+        self.setCentralWidget(self.pane)
+        self._forward_signals()
+
+    # ------------------------------------------------------------------
+    # Update notification helpers
+    def _init_update_notifications(self) -> None:
+        self._pending_update: Optional[UpdateMetadata] = None
+        self._update_dispatcher: Optional[UpdateDispatcher] = None
+        self._update_dialog_factory: Callable[[UpdateMetadata], QtWidgets.QDialog] = (
+            lambda metadata: UpdateNotificationDialog(metadata, self)
+        )
+        dispatcher = getattr(self.app_core, "update_dispatcher", None)
+        if isinstance(dispatcher, UpdateDispatcher):
+            self.set_update_dispatcher(dispatcher)
+
+    def set_update_dispatcher(self, dispatcher: UpdateDispatcher) -> None:
+        if self._update_dispatcher is dispatcher:
+            return
+        if self._update_dispatcher is not None:
+            self._update_dispatcher.remove_listener(self._on_update_available)
+        self._update_dispatcher = dispatcher
+        dispatcher.add_listener(self._on_update_available)
+
+    def _on_update_available(self, metadata: UpdateMetadata) -> None:
+        self._pending_update = metadata
+        dialog = self._create_update_dialog(metadata)
+        try:
+            dialog.exec_()
+        finally:
+            self.acknowledge_available_update()
+            self._pending_update = None
+
+    def _create_update_dialog(self, metadata: UpdateMetadata) -> QtWidgets.QDialog:
+        return self._update_dialog_factory(metadata)
+
+    def acknowledge_available_update(self) -> None:
+        if self._update_dispatcher is not None:
+            self._update_dispatcher.acknowledge()
+
+    # ------------------------------------------------------------------
+    # QWidget overrides
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        if self._update_dispatcher is not None:
+            self._update_dispatcher.remove_listener(self._on_update_available)
+        self.pane.teardown()
+        super().closeEvent(event)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self.pane.update_undo_redo_actions()
+
+    # ------------------------------------------------------------------
+    # Delegation helpers
+    def _forward_signals(self) -> None:
+        self.pane.pipelineDockVisibilityChanged.connect(
+            self.pipelineDockVisibilityChanged
+        )
+        self.pane.moduleControlsDockVisibilityChanged.connect(
+            self.moduleControlsDockVisibilityChanged
+        )
+        self.pane.diagnosticsDockVisibilityChanged.connect(
+            self.diagnosticsDockVisibilityChanged
+        )
+        self.pane.diagnosticsLoggingToggled.connect(self.diagnosticsLoggingToggled)
+        self.pane.moduleActivated.connect(self.moduleActivated)
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self.pane, item)
+
+    def on_activated(self) -> None:
+        self.pane.on_activated()
+
+    def on_deactivated(self) -> None:
+        self.pane.on_deactivated()
+
+    def load_image(self) -> None:
+        self.pane.load_image()
+
+    def save_outputs(self) -> None:
+        self.pane.save_outputs()
+
+    def update_pipeline_summary(self) -> None:
+        self.pane.update_pipeline_summary()
+
+    def set_diagnostics_visible(self, visible: bool) -> None:
+        self.pane.set_diagnostics_visible(visible)
+
+    def teardown(self) -> None:
+        self.pane.teardown()
+
+
+MainWindow = ModuleWindow
 
 
 __all__ = [
@@ -2675,8 +2788,10 @@ __all__ = [
     "CropDialog",
     "GammaDialog",
     "MainWindow",
+    "ModuleWindow",
     "NoiseReductionDialog",
     "NormalizeDialog",
+    "PreprocessingPane",
     "SelectChannelDialog",
     "SharpenDialog",
 ]
