@@ -8,8 +8,9 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PyQt5 import QtWidgets
+    from PyQt5 import QtCore, QtWidgets
 except ImportError as exc:  # pragma: no cover - skip if Qt bindings missing
+    QtCore = None  # type: ignore[assignment]
     QtWidgets = None  # type: ignore[assignment]
     pytestmark = pytest.mark.skip(reason=f"PyQt5 unavailable: {exc}")
 else:
@@ -92,6 +93,27 @@ class StubAppCore:
         return self._io_manager
 
 
+if QtCore is not None:
+    class StubController(QtCore.QObject):
+        stage_cache_updated = QtCore.pyqtSignal(object, object)
+
+        def __init__(self) -> None:
+            super().__init__()
+
+        def cached_stage_steps(self, stage) -> tuple:
+            return ()
+
+        def recompute_pipeline(self):  # pragma: no cover - stub interface
+            return ()
+
+else:  # pragma: no cover - executed only when Qt bindings missing
+    class StubController:  # type: ignore[too-few-public-methods]
+        def cached_stage_steps(self, stage) -> tuple:
+            return ()
+
+        def recompute_pipeline(self):
+            return ()
+
 def _ensure_qapp() -> QtWidgets.QApplication:
     app = QtWidgets.QApplication.instance()
     if app is None:
@@ -102,7 +124,7 @@ def _ensure_qapp() -> QtWidgets.QApplication:
 def test_segmentation_pane_initialises_in_tab_widget():
     _ensure_qapp()
     tab_widget = QtWidgets.QTabWidget()
-    pane = SegmentationPane(StubAppCore(), parent=tab_widget)
+    pane = SegmentationPane(StubAppCore(), StubController(), parent=tab_widget)
     tab_widget.addTab(pane, "Segmentation")
 
     assert pane.pipeline_label.text() == "Current Pipeline: (none)"

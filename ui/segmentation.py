@@ -7,7 +7,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -17,6 +17,7 @@ from core.app_core import AppCore
 from core.io_manager import IOManager
 from core.path_sanitizer import PathValidationError, sanitize_user_path
 from core.segmentation import Config, Loader, Preprocessor, parse_bool
+from plugins.module_base import ModuleStage
 from processing.segmentation_pipeline import (
     PipelineStep,
     ProcessingPipeline,
@@ -37,6 +38,7 @@ from ui.theme import (
 
 from yam_processor.ui.error_reporter import ErrorResolution, present_error_report
 
+from ui.unified import UnifiedPipelineController
 
 LOGGER = logging.getLogger(__name__)
 
@@ -991,10 +993,16 @@ def process_segmentation_file(
 
 class SegmentationPane(ModulePane):
     def __init__(
-        self, app_core: AppCore, parent: Optional[QtWidgets.QWidget] = None
+        self,
+        app_core: AppCore,
+        controller: UnifiedPipelineController,
+        parent: Optional[QtWidgets.QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self.app_core = app_core
+        self._controller = controller
+        self._pipeline_stage = ModuleStage.SEGMENTATION
+        self._upstream_stage = ModuleStage.PREPROCESSING
         self._host_window: Optional[QtWidgets.QMainWindow] = None
         self.setObjectName("segmentationPane")
 
@@ -1006,6 +1014,13 @@ class SegmentationPane(ModulePane):
         self.redo_stack: List[Tuple[np.ndarray, List[str]]] = []
         self.current_preview: Optional[np.ndarray] = None
         self.current_image_path: Optional[str] = None
+
+        try:
+            self.pipeline_cache = self.app_core.pipeline_cache
+        except Exception:  # pragma: no cover - cache may be unavailable in tests
+            self.pipeline_cache = None
+        self._source_id: Optional[str] = None
+        self._preprocessed_signature: Optional[str] = None
 
         self.settings_manager = self.app_core.settings
         self.settings = self.settings_manager.backend
@@ -1131,6 +1146,7 @@ class SegmentationPane(ModulePane):
         self.redo_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Y"), self)
         self.redo_shortcut.activated.connect(self.redo)
 
+        self._connect_controller_signals()
         self.pipeline = build_segmentation_pipeline(self.app_core)
         self.update_pipeline_label()
         if self.base_image is not None:
@@ -1217,6 +1233,130 @@ class SegmentationPane(ModulePane):
         if self.shortcut_registry is not None:
             self.shortcut_registry.register_action(description, action)
 
+    def _connect_controller_signals(self) -> None:
+        try:
+            self._controller.stage_cache_updated.connect(
+                self._on_controller_stage_cache_updated
+            )
+        except Exception:  # pragma: no cover - defensive connection
+            LOGGER.debug(
+                "SegmentationPane failed to connect controller signals",
+                exc_info=True,
+            )
+
+    def _on_controller_stage_cache_updated(
+        self, stage: ModuleStage, steps: Tuple[PipelineStep, ...]
+    ) -> None:
+        if stage == self._pipeline_stage:
+            self.update_pipeline_label(steps)
+            return
+        if stage == self._upstream_stage:
+            self._handle_preprocessing_mutation()
+
+    def _stage_pipeline_snapshot(
+        self, *, refresh: bool = False
+    ) -> Tuple[PipelineStep, ...]:
+        if refresh:
+            try:
+                self._controller.recompute_pipeline()
+            except Exception:  # pragma: no cover - defensive recomputation
+                LOGGER.debug("Failed to recompute pipeline for segmentation", exc_info=True)
+        try:
+            return self._controller.cached_stage_steps(self._pipeline_stage)
+        except Exception:  # pragma: no cover - defensive access
+            LOGGER.debug("Failed to access cached segmentation steps", exc_info=True)
+            return ()
+
+    def _preprocessing_pipeline_snapshot(self) -> Tuple[PipelineStep, ...]:
+        try:
+            return self._controller.cached_stage_steps(self._upstream_stage)
+        except Exception:  # pragma: no cover - defensive access
+            LOGGER.debug("Failed to access cached preprocessing steps", exc_info=True)
+            return ()
+
+    def _ensure_source_registered(self) -> Optional[str]:
+        if self.pipeline_cache is None or self.base_image is None:
+            return None
+        if self._source_id is not None:
+            return self._source_id
+        hint = self.current_image_path or "segmentation"
+        try:
+            self._source_id = self.pipeline_cache.register_source(
+                np.asarray(self.base_image), hint=hint
+            )
+        except Exception:  # pragma: no cover - defensive cache registration
+            LOGGER.exception("Failed to register segmentation source image")
+            self._source_id = None
+            return None
+        self._preprocessed_signature = self._source_id
+        return self._source_id
+
+    def _resolve_preprocessed_image(self) -> Optional[np.ndarray]:
+        if self.pipeline_cache is None or self.base_image is None:
+            return None
+        source_id = self._ensure_source_registered()
+        if source_id is None:
+            return None
+        steps = self._preprocessing_pipeline_snapshot()
+        if not steps:
+            self._preprocessed_signature = source_id
+            return np.array(self.base_image, copy=True)
+        try:
+            final_signature, _ = self.pipeline_cache.predict(source_id, steps)
+        except Exception:  # pragma: no cover - defensive prediction
+            LOGGER.exception("Failed to predict preprocessing signature for segmentation")
+            return None
+        try:
+            cached = self.pipeline_cache.get_cached_image(source_id, final_signature)
+        except Exception:  # pragma: no cover - defensive cache lookup
+            LOGGER.exception("Failed to fetch cached preprocessing image for segmentation")
+            cached = None
+        if cached is not None:
+            self._preprocessed_signature = final_signature
+            return cached
+        try:
+            result = self.pipeline_cache.compute(
+                source_id=source_id,
+                image=np.asarray(self.base_image),
+                steps=steps,
+            )
+        except Exception:  # pragma: no cover - defensive computation
+            LOGGER.exception("Failed to recompute preprocessing output for segmentation")
+            return None
+        self._preprocessed_signature = result.final_signature
+        return np.array(result.image, copy=True)
+
+    def _handle_preprocessing_mutation(self) -> None:
+        if self.pipeline_cache is None:
+            return
+        preprocessed = self._resolve_preprocessed_image()
+        if preprocessed is None:
+            return
+        self.base_image = np.array(preprocessed, copy=True)
+        if self.original_image is None:
+            self.original_image = np.array(preprocessed, copy=True)
+        try:
+            self.original_display.set_image(np.asarray(self.base_image))
+        except Exception:  # pragma: no cover - defensive UI update
+            LOGGER.debug("Failed to update original display after preprocessing change", exc_info=True)
+        try:
+            self.rebuild_pipeline()
+        except Exception:  # pragma: no cover - defensive rebuild
+            LOGGER.exception("Failed to rebuild segmentation pipeline after preprocessing change")
+            return
+        try:
+            updated = self.pipeline.apply(self.base_image)
+        except Exception:  # pragma: no cover - defensive apply
+            LOGGER.exception("Failed to apply segmentation pipeline after preprocessing change")
+            return
+        self.committed_image = np.array(updated, copy=True)
+        self.current_preview = np.array(updated, copy=True)
+        try:
+            self.preview_display.set_image(updated)
+        except Exception:  # pragma: no cover - defensive preview update
+            LOGGER.debug("Failed to refresh segmentation preview", exc_info=True)
+        self._show_status_message("Segmentation updated from preprocessing results.")
+
     # ModulePane interface -------------------------------------------------
 
     def on_activated(self) -> None:
@@ -1244,9 +1384,22 @@ class SegmentationPane(ModulePane):
     def teardown(self) -> None:  # pragma: no cover - hook for future cleanup
         pass
 
-    def update_pipeline_label(self):
-        order = self.order_manager.get_order()
-        self.pipeline_label.setText("Current Pipeline: " + " -> ".join(order) if order else "Current Pipeline: (none)")
+    def update_pipeline_label(
+        self, steps: Optional[Sequence[PipelineStep]] = None
+    ) -> None:
+        if steps is None:
+            steps = self._stage_pipeline_snapshot()
+        order = [
+            step.name
+            for step in steps
+            if getattr(step, "enabled", True)
+        ]
+        text = (
+            "Current Pipeline: " + " -> ".join(order)
+            if order
+            else "Current Pipeline: (none)"
+        )
+        self.pipeline_label.setText(text)
 
     def rebuild_pipeline(self):
         self.pipeline = build_segmentation_pipeline(self.app_core)
@@ -2170,6 +2323,10 @@ class SegmentationPane(ModulePane):
             )
             self.current_preview = self.committed_image.copy()
             self.current_image_path = str(path)
+            self._source_id = None
+            self._preprocessed_signature = None
+            if self.pipeline_cache is not None:
+                self._ensure_source_registered()
             self.original_display.set_image(self.original_image)
             self.preview_display.set_image(self.current_preview)
             self.undo_stack.clear()
@@ -2203,6 +2360,7 @@ class SegmentationPane(ModulePane):
             self.settings.setValue("segmentation/order", "")
             self.order_manager.set_order([])
             self.rebuild_pipeline()
+            self._handle_preprocessing_mutation()
 
         try:
             _attempt_load()
@@ -2440,7 +2598,8 @@ class ModuleWindow(QtWidgets.QMainWindow):
         self, app_core: AppCore, parent: Optional[QtWidgets.QWidget] = None
     ) -> None:
         super().__init__(parent)
-        self.pane = SegmentationPane(app_core, parent=self)
+        controller = UnifiedPipelineController(app_core, parent=self)
+        self.pane = SegmentationPane(app_core, controller, parent=self)
         self.statusBar()  # ensure status bar exists before attaching widgets
         self.pane.attach_host_window(self)
 

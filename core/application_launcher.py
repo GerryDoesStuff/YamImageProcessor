@@ -81,6 +81,7 @@ def _create_preprocessing_pane(
     from ui.unified import UnifiedPipelineController
 
     controller = UnifiedPipelineController(core, parent=host)
+    setattr(host, "_unified_pipeline_controller", controller)
     pane = PreprocessingPane(core, controller, host=host)
     docks: list[StageDock] = [
         (pane.pipeline_dock, _QtCore.Qt.RightDockWidgetArea),
@@ -101,8 +102,13 @@ def _create_segmentation_pane(
     from PyQt5 import QtCore as _QtCore
 
     from ui.segmentation import SegmentationPane
+    from ui.unified import UnifiedPipelineController
 
-    pane = SegmentationPane(core)
+    controller = getattr(host, "_unified_pipeline_controller", None)
+    if controller is None:
+        controller = UnifiedPipelineController(core, parent=host)
+        setattr(host, "_unified_pipeline_controller", controller)
+    pane = SegmentationPane(core, controller)
     pane.attach_host_window(host)
     docks: list[StageDock] = []
     shortcut_dock = getattr(pane, "shortcut_dock", None)
