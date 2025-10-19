@@ -387,6 +387,10 @@ class UnifiedPipelineController(QtCore.QObject):
         super().__init__(parent)
         self._app_core = app_core
         self._pipeline_manager: PipelineManager = app_core.get_pipeline_manager()
+        try:
+            self._pipeline_manager.add_change_listener(self._on_pipeline_manager_changed)
+        except AttributeError:  # pragma: no cover - defensive fallback when listener missing
+            LOGGER.debug("Pipeline manager does not support change listeners", exc_info=True)
         self._stage_order: Tuple[ModuleStage, ...] = tuple(ModuleStage)
         self._stage_ranges: Dict[ModuleStage, Tuple[int, int]] = {}
         self._stage_cache: Dict[ModuleStage, Tuple[PipelineStep, ...]] = {}
@@ -461,7 +465,6 @@ class UnifiedPipelineController(QtCore.QObject):
         insert_at, global_index = self._resolve_insert_index(stage, index)
         normalised = self._normalise_step(stage, step)
         self._pipeline_manager.add_step(normalised, index=global_index)
-        self._refresh_caches()
         self.stage_steps_inserted.emit(stage, insert_at, normalised.clone())
 
     def remove_stage_step(self, stage: ModuleStage, index: int) -> PipelineStep:
@@ -469,7 +472,6 @@ class UnifiedPipelineController(QtCore.QObject):
 
         global_index = self._resolve_index(stage, index)
         removed = self._pipeline_manager.remove_step(global_index)
-        self._refresh_caches()
         self.stage_steps_removed.emit(stage, index, removed.clone())
         return removed
 
@@ -484,20 +486,23 @@ class UnifiedPipelineController(QtCore.QObject):
         global_index = self._resolve_index(stage, index)
         step = self._pipeline_manager.get_step(global_index)
         mutator(step)
-        self._refresh_caches()
+        self._refresh_caches(affected_stages=(stage,))
         self.stage_steps_updated.emit(stage, index, step.clone())
         return step
 
     # ------------------------------------------------------------------
     # Cache management
     # ------------------------------------------------------------------
-    def recompute_pipeline(self) -> Tuple[PipelineStep, ...]:
+    def recompute_pipeline(
+        self, *, preserve_stage_results: bool = False
+    ) -> Tuple[PipelineStep, ...]:
         """Recompute cached snapshots for every stage and the full pipeline."""
 
         steps = tuple(self._pipeline_manager.steps)
         self._recalculate_stage_ranges(steps)
         self._stage_dependencies = self._build_stage_dependencies()
-        self._stage_results.clear()
+        if not preserve_stage_results:
+            self._stage_results.clear()
         self._combined_cache = tuple(step.clone() for step in steps)
         for stage in self._stage_order:
             start, end = self._stage_ranges[stage]
@@ -587,8 +592,23 @@ class UnifiedPipelineController(QtCore.QObject):
             return clone
         return step
 
-    def _refresh_caches(self) -> None:
-        self.recompute_pipeline()
+    def invalidate_stage_results(self, *stages: ModuleStage) -> None:
+        """Invalidate cached results for ``stages`` and their dependants."""
+
+        self._invalidate_stage_results(stages)
+
+    def _refresh_caches(
+        self, *, affected_stages: Optional[Iterable[ModuleStage]] = None
+    ) -> None:
+        if affected_stages is None:
+            targets = self._stage_order
+        else:
+            stage_set = {stage for stage in affected_stages if stage is not None}
+            targets = tuple(stage for stage in self._stage_order if stage in stage_set)
+            if not targets:
+                targets = self._stage_order
+        self.recompute_pipeline(preserve_stage_results=True)
+        self._invalidate_stage_results(targets)
 
     def _recalculate_stage_ranges(self, steps: Sequence[PipelineStep]) -> None:
         index = 0
@@ -606,6 +626,53 @@ class UnifiedPipelineController(QtCore.QObject):
             dependencies[stage] = tuple(upstream)
             upstream.append(stage)
         return dependencies
+
+    def _expand_downstream(
+        self, stages: Iterable[ModuleStage]
+    ) -> Tuple[ModuleStage, ...]:
+        stage_set = {stage for stage in stages if stage is not None}
+        if not stage_set:
+            return ()
+        ordered: List[ModuleStage] = []
+        for stage in self._stage_order:
+            if stage in stage_set:
+                ordered.append(stage)
+                continue
+            dependencies = self._stage_dependencies.get(stage, ())
+            if any(dep in stage_set for dep in dependencies):
+                ordered.append(stage)
+        return tuple(ordered)
+
+    def _invalidate_stage_results(self, stages: Iterable[ModuleStage]) -> None:
+        invalidated = self._expand_downstream(stages)
+        if not invalidated:
+            return
+        for stage in invalidated:
+            self._stage_results.pop(stage, None)
+
+    def _stages_from_payload(self, payload: Mapping[str, Any]) -> Tuple[ModuleStage, ...]:
+        stages: List[ModuleStage] = []
+        single = payload.get("step")
+        if isinstance(single, PipelineStep):
+            stage = getattr(single, "stage", None)
+            if stage is not None:
+                stages.append(stage)
+        steps_payload = payload.get("steps")
+        if isinstance(steps_payload, (list, tuple)):
+            for entry in steps_payload:
+                if not isinstance(entry, PipelineStep):
+                    continue
+                stage = getattr(entry, "stage", None)
+                if stage is None or stage in stages:
+                    continue
+                stages.append(stage)
+        return tuple(stages)
+
+    def _on_pipeline_manager_changed(self, event: str, payload: Dict[str, Any]) -> None:
+        affected = self._stages_from_payload(payload)
+        if not affected or event in {"pipeline_reset", "steps_replaced", "pipeline_restored"}:
+            affected = self._stage_order
+        self._refresh_caches(affected_stages=affected)
 
 
 __all__ = [
