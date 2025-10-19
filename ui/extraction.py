@@ -15,15 +15,27 @@ import pandas as pd
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from core.app_core import AppCore
-from core.extraction import Config, Loader, Preprocessor, parse_bool
-from core.path_sanitizer import PathValidationError, sanitize_user_path
-from processing.extraction_pipeline import (
-    PipelineStep,
-    ProcessingPipeline,
-    build_extraction_pipeline,
-    build_extraction_pipeline_from_dict,
-    get_extraction_settings_snapshot,
+from core.extraction import (
+    Config,
+    Loader,
+    Preprocessor,
+    approximate_shape_extraction,
+    fourier_descriptors_extraction,
+    fractal_dimension_extraction,
+    gabor_extraction,
+    haralick_extraction,
+    histogram_stats_extraction,
+    hog_extraction,
+    hu_moments_extraction,
+    lbp_extraction,
+    parse_bool,
+    region_properties_extraction,
 )
+from core.path_sanitizer import PathValidationError, sanitize_user_path
+from plugins.module_base import ModuleStage
+from processing.extraction_pipeline import get_extraction_settings_snapshot
+from processing.pipeline_manager import PipelineStep as ManagedPipelineStep
+from ui.unified import UnifiedPipelineController
 
 from yam_processor.ui.error_reporter import ErrorResolution, present_error_report
 from ui import ModulePane
@@ -47,6 +59,55 @@ def _build_extraction_pipeline_metadata(settings: Mapping[str, Any]) -> Dict[str
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _coerce_pipeline_output(result: object) -> np.ndarray:
+    """Convert ``result`` to a NumPy array without copying unnecessarily."""
+
+    if isinstance(result, np.ndarray):
+        return np.asarray(result)
+
+    to_array = getattr(result, "to_array", None)
+    if callable(to_array):
+        try:
+            array = to_array()
+        except Exception:  # pragma: no cover - defensive conversion
+            LOGGER.debug("Failed to coerce pipeline output via to_array", exc_info=True)
+        else:
+            return np.asarray(array)
+
+    return np.asarray(result)
+
+
+class ControllerBackedPipeline:
+    """Lightweight adapter exposing controller-backed ``apply`` semantics."""
+
+    def __init__(
+        self, controller: UnifiedPipelineController, stage: ModuleStage
+    ) -> None:
+        self._controller = controller
+        self._stage = stage
+
+    @property
+    def steps(self) -> Tuple[ManagedPipelineStep, ...]:
+        try:
+            return self._controller.stage_steps(self._stage)
+        except Exception:  # pragma: no cover - defensive access
+            LOGGER.debug("Failed to access controller steps", exc_info=True)
+            return ()
+
+    def apply(self, image: np.ndarray) -> np.ndarray:
+        result = np.asarray(image)
+        for step in self._controller.stage_steps(self._stage):
+            if not getattr(step, "enabled", True):
+                continue
+            try:
+                intermediate = step.apply(result)
+            except Exception:  # pragma: no cover - defensive execution
+                LOGGER.exception("Failed to execute extraction step %s", step.name)
+                raise
+            result = _coerce_pipeline_output(intermediate)
+        return np.array(result, copy=True)
 
 
 def _is_unified_shell(window: Optional[QtWidgets.QWidget]) -> bool:
@@ -446,6 +507,7 @@ class ExtractionPane(ModulePane):
     def __init__(
         self,
         app_core: AppCore,
+        controller: Optional[UnifiedPipelineController] = None,
         parent: Optional[QtWidgets.QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -453,6 +515,25 @@ class ExtractionPane(ModulePane):
         self._host_window: Optional[QtWidgets.QMainWindow] = None
         self._pending_status_message: Optional[Tuple[str, int]] = None
         self.setObjectName("extractionPane")
+
+        if controller is None and parent is not None:
+            controller = getattr(parent, "_unified_pipeline_controller", None)
+        if controller is None:
+            controller = UnifiedPipelineController(app_core, parent=self)
+            if parent is not None:
+                setattr(parent, "_unified_pipeline_controller", controller)
+        self._controller = controller
+        self._pipeline_stage = ModuleStage.ANALYSIS
+        self._segmentation_stage = ModuleStage.SEGMENTATION
+        self._preprocessing_stage = ModuleStage.PREPROCESSING
+
+        try:
+            self.pipeline_cache = self.app_core.pipeline_cache
+        except Exception:  # pragma: no cover - pipeline cache may be unavailable in tests
+            self.pipeline_cache = None
+        self._source_id: Optional[str] = None
+        self._preprocessed_signature: Optional[str] = None
+        self._segmentation_signature: Optional[str] = None
 
         self.original_image: Optional[np.ndarray] = None
         self.base_image: Optional[np.ndarray] = None
@@ -503,6 +584,19 @@ class ExtractionPane(ModulePane):
         self.settings.setValue("extraction/order", "")
         self.order_manager = ExtractionPipelineOrderManager(self.settings)
 
+        self._extraction_functions: Dict[str, Callable[..., np.ndarray]] = {
+            "Region Properties": region_properties_extraction,
+            "Hu Moments": hu_moments_extraction,
+            "LBP": lbp_extraction,
+            "Haralick": haralick_extraction,
+            "Gabor": gabor_extraction,
+            "Fourier": fourier_descriptors_extraction,
+            "HOG": hog_extraction,
+            "Histogram": histogram_stats_extraction,
+            "Fractal": fractal_dimension_extraction,
+            "Approximate Shape": approximate_shape_extraction,
+        }
+
         self._extraction_actions: Dict[str, QtWidgets.QAction] = {}
         self._create_actions()
 
@@ -546,7 +640,11 @@ class ExtractionPane(ModulePane):
         self.redo_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Y"), self)
         self.redo_shortcut.activated.connect(self.redo)
 
-        self.pipeline = build_extraction_pipeline(self.app_core)
+        self.pipeline = ControllerBackedPipeline(
+            self._controller, self._pipeline_stage
+        )
+        self._connect_controller_signals()
+        self.rebuild_pipeline()
         self.update_pipeline_label()
         if self.base_image is not None:
             self.update_preview()
@@ -654,13 +752,333 @@ class ExtractionPane(ModulePane):
         self, order: Sequence[str] | None = None
     ) -> None:
         if order is None:
-            order = self.order_manager.get_order()
+            order = self._controller_order()
         for name, action in self._extraction_actions.items():
             if name in order:
                 index = order.index(name) + 1
                 action.setText(f"{index}. {name}")
             else:
                 action.setText(name)
+
+    # ------------------------------------------------------------------
+    # Controller integration helpers
+    # ------------------------------------------------------------------
+    def _connect_controller_signals(self) -> None:
+        try:
+            self._controller.stage_cache_updated.connect(
+                self._on_controller_stage_cache_updated
+            )
+        except Exception:  # pragma: no cover - defensive connection
+            LOGGER.debug(
+                "ExtractionPane failed to connect controller signals",
+                exc_info=True,
+            )
+
+    def _on_controller_stage_cache_updated(
+        self, stage: ModuleStage, steps: Tuple[ManagedPipelineStep, ...]
+    ) -> None:
+        if stage == self._pipeline_stage:
+            self._sync_settings_from_controller(steps)
+            self.update_pipeline_label(steps)
+            return
+        if stage in (self._segmentation_stage, self._preprocessing_stage):
+            self._handle_upstream_mutation()
+
+    def _sync_settings_from_controller(
+        self, steps: Sequence[ManagedPipelineStep]
+    ) -> None:
+        order = [step.name for step in steps if getattr(step, "enabled", True)]
+        if order != self.order_manager.get_order():
+            self.order_manager.set_order(order)
+        self._update_extraction_action_labels(order)
+
+    def _controller_order(self) -> List[str]:
+        try:
+            steps = self._controller.stage_steps(self._pipeline_stage)
+        except Exception:  # pragma: no cover - defensive access
+            LOGGER.debug("Failed to access controller order", exc_info=True)
+            return []
+        return [step.name for step in steps if getattr(step, "enabled", True)]
+
+    def _settings_int(self, key: str, default: int) -> int:
+        value = self.settings.value(key, default)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return int(default)
+
+    def _settings_float(self, key: str, default: float) -> float:
+        value = self.settings.value(key, default)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _step_parameters(
+        self, name: str, overrides: Optional[Mapping[str, Any]] = None
+    ) -> Dict[str, Any]:
+        overrides = dict(overrides or {})
+        if name == "LBP":
+            return {
+                "P": int(overrides.get("P", self._settings_int("extraction/LBP/P", 8))),
+                "R": float(
+                    overrides.get("R", self._settings_float("extraction/LBP/R", 1.0))
+                ),
+            }
+        if name == "Haralick":
+            return {
+                "distance": int(
+                    overrides.get(
+                        "distance", self._settings_int("extraction/Haralick/distance", 1)
+                    )
+                ),
+                "angle": float(
+                    overrides.get(
+                        "angle", self._settings_float("extraction/Haralick/angle", 0.0)
+                    )
+                ),
+            }
+        if name == "Gabor":
+            return {
+                "ksize": int(
+                    overrides.get("ksize", self._settings_int("extraction/Gabor/ksize", 21))
+                ),
+                "sigma": float(
+                    overrides.get("sigma", self._settings_float("extraction/Gabor/sigma", 5.0))
+                ),
+                "theta": float(
+                    overrides.get("theta", self._settings_float("extraction/Gabor/theta", 0.0))
+                ),
+                "lambd": float(
+                    overrides.get("lambd", self._settings_float("extraction/Gabor/lambd", 10.0))
+                ),
+                "gamma": float(
+                    overrides.get("gamma", self._settings_float("extraction/Gabor/gamma", 0.5))
+                ),
+                "psi": float(
+                    overrides.get("psi", self._settings_float("extraction/Gabor/psi", 0.0))
+                ),
+            }
+        if name == "Fourier":
+            return {
+                "num_coeff": int(
+                    overrides.get(
+                        "num_coeff", self._settings_int("extraction/Fourier/num_coeff", 10)
+                    )
+                )
+            }
+        if name == "HOG":
+            orientations = int(
+                overrides.get(
+                    "orientations",
+                    self._settings_int("extraction/HOG/orientations", 9),
+                )
+            )
+            ppc_value = overrides.get("pixels_per_cell")
+            if ppc_value is None:
+                ppc = self._settings_int("extraction/HOG/ppc", 8)
+                pixels_per_cell = (ppc, ppc)
+            elif isinstance(ppc_value, (tuple, list)) and len(ppc_value) >= 2:
+                pixels_per_cell = (int(ppc_value[0]), int(ppc_value[1]))
+            else:
+                value = int(ppc_value)
+                pixels_per_cell = (value, value)
+            cpb_value = overrides.get("cells_per_block")
+            if cpb_value is None:
+                cpb = self._settings_int("extraction/HOG/cpb", 3)
+                cells_per_block = (cpb, cpb)
+            elif isinstance(cpb_value, (tuple, list)) and len(cpb_value) >= 2:
+                cells_per_block = (int(cpb_value[0]), int(cpb_value[1]))
+            else:
+                value = int(cpb_value)
+                cells_per_block = (value, value)
+            return {
+                "orientations": orientations,
+                "pixels_per_cell": pixels_per_cell,
+                "cells_per_block": cells_per_block,
+            }
+        if name == "Fractal":
+            return {
+                "min_box_size": int(
+                    overrides.get(
+                        "min_box_size",
+                        self._settings_int("extraction/Fractal/min_box_size", 2),
+                    )
+                )
+            }
+        if name == "Approximate Shape":
+            return {
+                "error_threshold": float(
+                    overrides.get(
+                        "error_threshold",
+                        self._settings_float(
+                            "extraction/Approximate Shape/error_threshold", 1.0
+                        ),
+                    )
+                )
+            }
+        return dict(overrides)
+
+    def _build_stage_step(
+        self, name: str, overrides: Optional[Mapping[str, Any]] = None
+    ) -> Optional[ManagedPipelineStep]:
+        function = self._extraction_functions.get(name)
+        if function is None:
+            LOGGER.debug("Unknown extraction step requested: %s", name)
+            return None
+        params = self._step_parameters(name, overrides)
+        step = ManagedPipelineStep(
+            name=name,
+            function=function,
+            enabled=True,
+            params=params,
+            stage=self._pipeline_stage,
+        )
+        return step
+
+    def _replace_controller_steps(self, order: Sequence[str]) -> None:
+        try:
+            current = self._controller.stage_steps(self._pipeline_stage)
+        except Exception:  # pragma: no cover - defensive access
+            LOGGER.debug("Failed to access current extraction steps", exc_info=True)
+            current = ()
+        for index in range(len(current) - 1, -1, -1):
+            try:
+                self._controller.remove_stage_step(self._pipeline_stage, index)
+            except Exception:  # pragma: no cover - defensive removal
+                LOGGER.debug("Failed to remove extraction step", exc_info=True)
+        for name in order:
+            step = self._build_stage_step(name)
+            if step is None:
+                continue
+            try:
+                self._controller.insert_stage_step(self._pipeline_stage, step)
+            except Exception:  # pragma: no cover - defensive insertion
+                LOGGER.debug("Failed to insert extraction step %s", name, exc_info=True)
+
+    def _execute_virtual_pipeline(
+        self,
+        image: np.ndarray,
+        order: Sequence[str],
+        overrides: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    ) -> np.ndarray:
+        result = np.asarray(image)
+        override_map = overrides or {}
+        for name in order:
+            step = self._build_stage_step(name, override_map.get(name))
+            if step is None:
+                continue
+            result = _coerce_pipeline_output(step.apply(result))
+        return np.array(result, copy=True)
+
+    # ------------------------------------------------------------------
+    # Upstream cache integration
+    # ------------------------------------------------------------------
+    def _ensure_source_registered(self) -> Optional[str]:
+        if self.pipeline_cache is None or self.original_image is None:
+            return None
+        if self._source_id is not None:
+            return self._source_id
+        hint = self.current_image_path or "extraction"
+        try:
+            self._source_id = self.pipeline_cache.register_source(
+                np.asarray(self.original_image), hint=hint
+            )
+        except Exception:  # pragma: no cover - defensive registration
+            LOGGER.exception("Failed to register extraction source image")
+            self._source_id = None
+        return self._source_id
+
+    def _collect_upstream_steps(self) -> Tuple[ManagedPipelineStep, ...]:
+        steps: List[ManagedPipelineStep] = []
+        try:
+            preprocessing = self._controller.cached_stage_steps(
+                self._preprocessing_stage
+            )
+        except Exception:  # pragma: no cover - defensive access
+            preprocessing = ()
+            LOGGER.debug("Failed to access preprocessing steps for extraction", exc_info=True)
+        try:
+            segmentation = self._controller.cached_stage_steps(
+                self._segmentation_stage
+            )
+        except Exception:  # pragma: no cover - defensive access
+            segmentation = ()
+            LOGGER.debug("Failed to access segmentation steps for extraction", exc_info=True)
+        for step in preprocessing:
+            steps.append(step.clone())
+        for step in segmentation:
+            steps.append(step.clone())
+        return tuple(steps)
+
+    def _resolve_upstream_image(self) -> Optional[np.ndarray]:
+        if self.original_image is None:
+            return None
+        if self.pipeline_cache is None:
+            return np.array(self.original_image, copy=True)
+        source_id = self._ensure_source_registered()
+        if source_id is None:
+            return np.array(self.original_image, copy=True)
+        steps = self._collect_upstream_steps()
+        if not steps:
+            return np.array(self.original_image, copy=True)
+        final_signature: Optional[str]
+        try:
+            final_signature, _ = self.pipeline_cache.predict(source_id, steps)
+        except Exception:  # pragma: no cover - defensive prediction
+            LOGGER.debug(
+                "Failed to predict upstream signature for extraction", exc_info=True
+            )
+            final_signature = None
+        cached: Optional[np.ndarray] = None
+        if final_signature is not None:
+            try:
+                cached = self.pipeline_cache.get_cached_image(source_id, final_signature)
+            except Exception:  # pragma: no cover - defensive lookup
+                LOGGER.debug(
+                    "Failed to fetch cached upstream image for extraction",
+                    exc_info=True,
+                )
+        if cached is not None:
+            self._segmentation_signature = final_signature
+            return cached
+        try:
+            result = self.pipeline_cache.compute(
+                source_id=source_id,
+                image=np.asarray(self.original_image),
+                steps=steps,
+            )
+        except Exception:  # pragma: no cover - defensive compute
+            LOGGER.exception("Failed to recompute upstream pipeline for extraction")
+            return None
+        self._segmentation_signature = result.final_signature
+        return np.array(result.image, copy=True)
+
+    def _handle_upstream_mutation(self) -> None:
+        if self.original_image is None:
+            return
+        upstream = self._resolve_upstream_image()
+        if upstream is None:
+            upstream = np.array(self.original_image, copy=True)
+        self.base_image = np.array(upstream, copy=True)
+        try:
+            self.original_display.set_image(np.asarray(self.base_image))
+        except Exception:  # pragma: no cover - defensive UI update
+            LOGGER.debug("Failed to update extraction base display", exc_info=True)
+        if self.base_image is None:
+            return
+        try:
+            updated = self.pipeline.apply(self.base_image)
+        except Exception:  # pragma: no cover - defensive apply
+            LOGGER.exception("Failed to apply extraction pipeline after upstream change")
+            return
+        self.committed_image = np.array(updated, copy=True)
+        self.current_preview = np.array(updated, copy=True)
+        try:
+            self.preview_display.set_image(updated)
+        except Exception:  # pragma: no cover - defensive preview update
+            LOGGER.debug("Failed to refresh extraction preview", exc_info=True)
+        self._show_status_message("Extraction updated from upstream results.")
 
     def build_menu(self) -> None:
         if self._host_window is None:
@@ -727,31 +1145,41 @@ class ExtractionPane(ModulePane):
     def teardown(self) -> None:  # pragma: no cover - hook for future cleanup
         pass
 
-    def update_pipeline_label(self):
-        order = self.order_manager.get_order()
-        if order:
-            label = "Current Pipeline: " + " -> ".join(order)
-        else:
-            label = "Current Pipeline: (none)"
+    def update_pipeline_label(
+        self, steps: Optional[Sequence[ManagedPipelineStep]] = None
+    ) -> None:
+        if steps is None:
+            steps = self._controller.stage_steps(self._pipeline_stage)
+        order = [
+            step.name for step in steps if getattr(step, "enabled", True)
+        ]
+        label = (
+            "Current Pipeline: " + " -> ".join(order)
+            if order
+            else "Current Pipeline: (none)"
+        )
         self.pipeline_label.setText(label)
         self._update_extraction_action_labels(order)
 
-    def rebuild_pipeline(self):
-        self.pipeline = build_extraction_pipeline(self.app_core)
-        logging.debug("Pipeline rebuilt with steps: " + ", ".join([step.name for step in self.pipeline.steps]))
+    def rebuild_pipeline(self) -> None:
+        order = self.get_extraction_order()
+        self._replace_controller_steps(order)
+        logging.debug(
+            "Pipeline rebuilt with steps: %s", ", ".join(self._controller_order())
+        )
         self.update_pipeline_label()
 
     def get_extraction_order(self) -> List[str]:
-        order_str = self.settings.value("extraction/order", "")
-        return order_str.split(",") if order_str else []
+        return self.order_manager.get_order()
 
-    def set_extraction_order(self, order: List[str]):
-        self.settings.setValue("extraction/order", ",".join(order))
-        self.update_pipeline_label()
+    def set_extraction_order(self, order: List[str]) -> None:
+        self.order_manager.set_order(order)
+        self._replace_controller_steps(order)
 
-    def commit_extraction(self, func_name: str):
-        self.order_manager.append_function(func_name)
-        self.update_pipeline_label()
+    def commit_extraction(self, func_name: str) -> None:
+        order = self.get_extraction_order()
+        order.append(func_name)
+        self.set_extraction_order(order)
 
     def push_undo_state(self, backup: np.ndarray):
         self.undo_stack.append((backup.copy(), self.get_extraction_order()))
@@ -762,11 +1190,16 @@ class ExtractionPane(ModulePane):
             current_state = (self.committed_image.copy(), self.get_extraction_order())
             self.redo_stack.append(current_state)
             prev_image, prev_order = self.undo_stack.pop()
-            self.committed_image = prev_image.copy()
             self.set_extraction_order(prev_order)
-            self.rebuild_pipeline()
-            self.current_preview = self.pipeline.apply(self.base_image)
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                updated = self.pipeline.apply(self.base_image)
+                self.committed_image = np.array(updated, copy=True)
+                self.current_preview = np.array(updated, copy=True)
+                self.preview_display.set_image(updated)
+            else:
+                self.committed_image = prev_image.copy()
+                self.current_preview = prev_image.copy()
+                self.preview_display.set_image(prev_image)
             self.update_undo_redo_actions()
 
     def redo(self):
@@ -774,11 +1207,16 @@ class ExtractionPane(ModulePane):
             current_state = (self.committed_image.copy(), self.get_extraction_order())
             self.undo_stack.append(current_state)
             next_image, next_order = self.redo_stack.pop()
-            self.committed_image = next_image.copy()
             self.set_extraction_order(next_order)
-            self.rebuild_pipeline()
-            self.current_preview = self.pipeline.apply(self.base_image)
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                updated = self.pipeline.apply(self.base_image)
+                self.committed_image = np.array(updated, copy=True)
+                self.current_preview = np.array(updated, copy=True)
+                self.preview_display.set_image(updated)
+            else:
+                self.committed_image = next_image.copy()
+                self.current_preview = next_image.copy()
+                self.preview_display.set_image(next_image)
             self.update_undo_redo_actions()
 
     def update_undo_redo_actions(self):
@@ -822,21 +1260,16 @@ class ExtractionPane(ModulePane):
                 "Reset all extraction settings to defaults."
             )
 
-    def preview_update(self, func_name: str, new_params: Dict[str, Any]):
-        temp_dict = get_extraction_settings_snapshot(self.settings_manager)
-        # For simplicity, use the same method name for keys
-        temp_dict[f"extraction/{func_name}/enabled"] = True
-        order = temp_dict.get("extraction/order", "")
-        order_list = order.split(",") if order else []
-        temp_order = order_list + [func_name]
-        temp_dict["extraction/order"] = ",".join(temp_order)
-        for key, value in new_params.items():
-            temp_dict[f"extraction/{func_name}/{key}"] = value
-        temp_pipeline = build_extraction_pipeline_from_dict(temp_dict, self.app_core)
-        if self.base_image is not None:
-            new_preview = temp_pipeline.apply(self.base_image)
-            self.current_preview = new_preview.copy()
-            self.preview_display.set_image(new_preview)
+    def preview_update(self, func_name: str, new_params: Dict[str, Any]) -> None:
+        if self.base_image is None:
+            return
+        temp_order = self._controller_order() + [func_name]
+        overrides = {func_name: dict(new_params)}
+        new_preview = self._execute_virtual_pipeline(
+            self.base_image, temp_order, overrides
+        )
+        self.current_preview = np.array(new_preview, copy=True)
+        self.preview_display.set_image(new_preview)
 
     # Extraction Handlers
     def extraction_region_properties(self):
@@ -845,10 +1278,11 @@ class ExtractionPane(ModulePane):
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             self.push_undo_state(backup)
             self.commit_extraction("Region Properties")
-            self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                updated = self.pipeline.apply(self.base_image)
+                self.committed_image = np.array(updated, copy=True)
+                self.current_preview = np.array(updated, copy=True)
+                self.preview_display.set_image(updated)
         else:
             if backup is not None:
                 self.preview_display.set_image(backup)
@@ -859,10 +1293,11 @@ class ExtractionPane(ModulePane):
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             self.push_undo_state(backup)
             self.commit_extraction("Hu Moments")
-            self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                updated = self.pipeline.apply(self.base_image)
+                self.committed_image = np.array(updated, copy=True)
+                self.current_preview = np.array(updated, copy=True)
+                self.preview_display.set_image(updated)
         else:
             if backup is not None:
                 self.preview_display.set_image(backup)
@@ -880,10 +1315,11 @@ class ExtractionPane(ModulePane):
             self.commit_extraction("LBP")
             self.settings.setValue("extraction/LBP/P", P)
             self.settings.setValue("extraction/LBP/R", R)
-            self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                updated = self.pipeline.apply(self.base_image)
+                self.committed_image = np.array(updated, copy=True)
+                self.current_preview = np.array(updated, copy=True)
+                self.preview_display.set_image(updated)
         else:
             if backup is not None:
                 self.preview_display.set_image(backup)
@@ -901,10 +1337,11 @@ class ExtractionPane(ModulePane):
             self.commit_extraction("Haralick")
             self.settings.setValue("extraction/Haralick/distance", d)
             self.settings.setValue("extraction/Haralick/angle", a)
-            self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                updated = self.pipeline.apply(self.base_image)
+                self.committed_image = np.array(updated, copy=True)
+                self.current_preview = np.array(updated, copy=True)
+                self.preview_display.set_image(updated)
         else:
             if backup is not None:
                 self.preview_display.set_image(backup)
@@ -931,10 +1368,11 @@ class ExtractionPane(ModulePane):
             self.settings.setValue("extraction/Gabor/lambd", l)
             self.settings.setValue("extraction/Gabor/gamma", g)
             self.settings.setValue("extraction/Gabor/psi", p)
-            self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                updated = self.pipeline.apply(self.base_image)
+                self.committed_image = np.array(updated, copy=True)
+                self.current_preview = np.array(updated, copy=True)
+                self.preview_display.set_image(updated)
         else:
             if backup is not None:
                 self.preview_display.set_image(backup)
@@ -950,10 +1388,11 @@ class ExtractionPane(ModulePane):
             self.push_undo_state(backup)
             self.commit_extraction("Fourier")
             self.settings.setValue("extraction/Fourier/num_coeff", num)
-            self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                updated = self.pipeline.apply(self.base_image)
+                self.committed_image = np.array(updated, copy=True)
+                self.current_preview = np.array(updated, copy=True)
+                self.preview_display.set_image(updated)
         else:
             if backup is not None:
                 self.preview_display.set_image(backup)
@@ -973,10 +1412,11 @@ class ExtractionPane(ModulePane):
             self.settings.setValue("extraction/HOG/orientations", o)
             self.settings.setValue("extraction/HOG/ppc", ppc)
             self.settings.setValue("extraction/HOG/cpb", cpb)
-            self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                updated = self.pipeline.apply(self.base_image)
+                self.committed_image = np.array(updated, copy=True)
+                self.current_preview = np.array(updated, copy=True)
+                self.preview_display.set_image(updated)
         else:
             if backup is not None:
                 self.preview_display.set_image(backup)
@@ -987,10 +1427,11 @@ class ExtractionPane(ModulePane):
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             self.push_undo_state(backup)
             self.commit_extraction("Histogram")
-            self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                updated = self.pipeline.apply(self.base_image)
+                self.committed_image = np.array(updated, copy=True)
+                self.current_preview = np.array(updated, copy=True)
+                self.preview_display.set_image(updated)
         else:
             if backup is not None:
                 self.preview_display.set_image(backup)
@@ -1006,10 +1447,11 @@ class ExtractionPane(ModulePane):
             self.push_undo_state(backup)
             self.commit_extraction("Fractal")
             self.settings.setValue("extraction/Fractal/min_box_size", box)
-            self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                updated = self.pipeline.apply(self.base_image)
+                self.committed_image = np.array(updated, copy=True)
+                self.current_preview = np.array(updated, copy=True)
+                self.preview_display.set_image(updated)
         else:
             if backup is not None:
                 self.preview_display.set_image(backup)
@@ -1025,10 +1467,11 @@ class ExtractionPane(ModulePane):
             self.push_undo_state(backup)
             self.commit_extraction("Approximate Shape")
             self.settings.setValue("extraction/Approximate Shape/error_threshold", error)
-            self.rebuild_pipeline()
-            self.committed_image = self.pipeline.apply(self.base_image)
-            self.current_preview = self.committed_image.copy()
-            self.preview_display.set_image(self.current_preview)
+            if self.base_image is not None:
+                updated = self.pipeline.apply(self.base_image)
+                self.committed_image = np.array(updated, copy=True)
+                self.current_preview = np.array(updated, copy=True)
+                self.preview_display.set_image(updated)
         else:
             if backup is not None:
                 self.preview_display.set_image(backup)
@@ -1154,14 +1597,11 @@ class ExtractionPane(ModulePane):
 
         def _attempt_load() -> None:
             self.original_image = Loader.load_image(str(path))
-            self.base_image = self.original_image.copy()
-            self.committed_image = build_extraction_pipeline(self.app_core).apply(
-                self.base_image
-            )
-            self.current_preview = self.committed_image.copy()
             self.current_image_path = str(path)
             self.original_display.set_image(self.original_image)
-            self.preview_display.set_image(self.current_preview)
+            self.base_image = np.array(self.original_image, copy=True)
+            self.committed_image = None
+            self.current_preview = None
             self.undo_stack.clear()
             self.redo_stack.clear()
             self.update_undo_redo_actions()
@@ -1178,6 +1618,10 @@ class ExtractionPane(ModulePane):
             self.settings.setValue("extraction/Approximate Shape/enabled", False)
             self.order_manager.set_order([])
             self.rebuild_pipeline()
+            self._source_id = None
+            self._preprocessed_signature = None
+            self._segmentation_signature = None
+            self._handle_upstream_mutation()
 
         try:
             _attempt_load()
@@ -1548,7 +1992,9 @@ class ModuleWindow(QtWidgets.QMainWindow):
         super().__init__(parent)
         self.setObjectName("extractionMainWindow")
         self.app_core = app_core
-        self.pane = ExtractionPane(app_core, parent=self)
+        controller = UnifiedPipelineController(app_core, parent=self)
+        setattr(self, "_unified_pipeline_controller", controller)
+        self.pane = ExtractionPane(app_core, controller=controller, parent=self)
         self.statusBar()  # ensure status bar exists prior to attachment
         self.pane.attach_host_window(self)
 
