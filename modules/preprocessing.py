@@ -1,12 +1,41 @@
 """Pre-processing plugin implementations."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING, Protocol, cast
 
 import cv2
 import numpy as np
 
 from plugins.module_base import ModuleBase, ModuleMetadata, ModuleStage
+
+
+if TYPE_CHECKING:
+    from ui import ModulePane
+
+    class _PreprocessingPane(Protocol):
+        """Structural typing helper describing preprocessing pane affordances."""
+
+        def toggle_grayscale(self) -> None: ...
+
+        def show_brightness_contrast_dialog(self) -> None: ...
+
+        def show_gamma_dialog(self) -> None: ...
+
+        def show_normalize_dialog(self) -> None: ...
+
+        def show_noise_reduction_dialog(self) -> None: ...
+
+        def show_sharpen_dialog(self) -> None: ...
+
+        def show_select_channel_dialog(self) -> None: ...
+
+        def show_crop_dialog(self) -> None: ...
+
+
+def _preprocessing_pane(pane: "ModulePane") -> "_PreprocessingPane":
+    """Cast ``pane`` to the richer preprocessing pane protocol for typing."""
+
+    return cast("_PreprocessingPane", pane)
 
 
 class GrayscaleModule(ModuleBase):
@@ -25,8 +54,8 @@ class GrayscaleModule(ModuleBase):
             return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         return image
 
-    def activate(self, window) -> None:  # type: ignore[override]
-        window.toggle_grayscale()
+    def activate(self, pane: "ModulePane") -> None:
+        _preprocessing_pane(pane).toggle_grayscale()
 
 
 class BrightnessContrastModule(ModuleBase):
@@ -48,8 +77,8 @@ class BrightnessContrastModule(ModuleBase):
             raise ValueError("Alpha must be > 0")
         return cv2.convertScaleAbs(image, alpha=alpha, beta=beta)
 
-    def activate(self, window) -> None:  # type: ignore[override]
-        window.show_brightness_contrast_dialog()
+    def activate(self, pane: "ModulePane") -> None:
+        _preprocessing_pane(pane).show_brightness_contrast_dialog()
 
 
 class GammaCorrectionModule(ModuleBase):
@@ -72,8 +101,8 @@ class GammaCorrectionModule(ModuleBase):
         table = np.array([(i / 255.0) ** inv_gamma * 255 for i in range(256)]).astype("uint8")
         return cv2.LUT(image, table)
 
-    def activate(self, window) -> None:  # type: ignore[override]
-        window.show_gamma_dialog()
+    def activate(self, pane: "ModulePane") -> None:
+        _preprocessing_pane(pane).show_gamma_dialog()
 
 
 class IntensityNormalizationModule(ModuleBase):
@@ -93,8 +122,8 @@ class IntensityNormalizationModule(ModuleBase):
         beta = float(params.get("beta", 255))
         return cv2.normalize(image, None, alpha, beta, cv2.NORM_MINMAX)
 
-    def activate(self, window) -> None:  # type: ignore[override]
-        window.show_normalize_dialog()
+    def activate(self, pane: "ModulePane") -> None:
+        _preprocessing_pane(pane).show_normalize_dialog()
 
 
 class NoiseReductionModule(ModuleBase):
@@ -120,8 +149,8 @@ class NoiseReductionModule(ModuleBase):
             return cv2.bilateralFilter(image, ksize, 75, 75)
         return image
 
-    def activate(self, window) -> None:  # type: ignore[override]
-        window.show_noise_reduction_dialog()
+    def activate(self, pane: "ModulePane") -> None:
+        _preprocessing_pane(pane).show_noise_reduction_dialog()
 
 
 class SharpenModule(ModuleBase):
@@ -141,8 +170,8 @@ class SharpenModule(ModuleBase):
         blurred = cv2.GaussianBlur(image, (0, 0), sigmaX=3)
         return cv2.addWeighted(image, 1 + strength, blurred, -strength, 0)
 
-    def activate(self, window) -> None:  # type: ignore[override]
-        window.show_sharpen_dialog()
+    def activate(self, pane: "ModulePane") -> None:
+        _preprocessing_pane(pane).show_sharpen_dialog()
 
 
 class SelectChannelModule(ModuleBase):
@@ -179,8 +208,8 @@ class SelectChannelModule(ModuleBase):
             return np.uint8((blue.astype(np.float32) + red.astype(np.float32)) / 2)
         return working
 
-    def activate(self, window) -> None:  # type: ignore[override]
-        window.show_select_channel_dialog()
+    def activate(self, pane: "ModulePane") -> None:
+        _preprocessing_pane(pane).show_select_channel_dialog()
 
 
 class CropModule(ModuleBase):
@@ -222,8 +251,8 @@ class CropModule(ModuleBase):
             return output
         return image[y_offset : y_offset + height, x_offset : x_offset + width]
 
-    def activate(self, window) -> None:  # type: ignore[override]
-        window.show_crop_dialog()
+    def activate(self, pane: "ModulePane") -> None:
+        _preprocessing_pane(pane).show_crop_dialog()
 
 
 MODULE_CLASSES = (

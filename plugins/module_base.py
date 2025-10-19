@@ -12,7 +12,7 @@ from processing.pipeline_manager import PipelineStep, StepExecutionMetadata
 from processing.tiled_records import TiledPipelineImage
 
 if TYPE_CHECKING:  # pragma: no cover - only used for typing
-    from ui.preprocessing import MainWindow
+    from ui import ModulePane
     from ui.control_metadata import ControlMetadata
 
 
@@ -92,8 +92,8 @@ class ModuleBase(ABC):
             ),
         )
 
-    def activate(self, window: "MainWindow") -> None:
-        """Execute the module's UI interaction when invoked from a menu."""
+    def activate(self, pane: "ModulePane") -> None:
+        """Execute the module's UI interaction when invoked from a pane menu."""
 
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement an activation handler"

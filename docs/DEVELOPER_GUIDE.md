@@ -88,6 +88,14 @@ class inherits from `ModuleBase`. During application bootstrap the registry adds
 these classes to the pipeline catalogue so the UI can present them for
 insertion.
 
+`ModuleBase.activate` receives the `ModulePane` hosting the module. Plugins
+should restrict themselves to the lifecycle hooks exposed on that shared
+interface (activation, teardown, diagnostics visibility, and so on). Where a
+stage-specific pane provides richer affordances, wrap access to those features
+behind lightweight typing protocols or helper functions so the runtime contract
+remains the common `ModulePane` surface. This keeps the modules usable in the
+unified shell as well as any stage-dedicated host windows.
+
 ## Logging expectations
 
 Logging is configured globally by `yam_processor.core.logging_config.LoggingConfigurator`.
