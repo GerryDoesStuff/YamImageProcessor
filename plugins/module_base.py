@@ -140,6 +140,7 @@ class ModuleBase(ABC):
             params=self.default_parameters(),
             execution=self.pipeline_execution_metadata(),
             supports_tiled_input=self.supports_tiled_input(),
+            stage=self.metadata.stage,
         )
 
     @abstractmethod

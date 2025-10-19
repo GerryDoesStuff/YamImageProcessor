@@ -193,6 +193,11 @@ class AppCore:
         self._bootstrapped = False
         self._preprocessing_manager: Optional[PipelineManager] = None
         self._preprocessing_templates: Dict[str, PipelineStep] = {}
+        self._pipeline_manager: Optional[PipelineManager] = None
+        self._pipeline_stage_templates: Dict[
+            ModuleStage, Dict[str, PipelineStep]
+        ] = {entry_stage: {} for entry_stage in ModuleStage}
+        self._pipeline_stage_ranges: Dict[ModuleStage, Tuple[int, int]] = {}
         self._pipeline_cache: Optional[PipelineCache] = None
         self.session_temp_root: Optional[Path] = None
         self.session_pipeline_cache_dir: Optional[Path] = None
@@ -272,6 +277,11 @@ class AppCore:
         self._pipeline_cache = None
         self._preprocessing_manager = None
         self._preprocessing_templates = {}
+        self._pipeline_manager = None
+        self._pipeline_stage_templates = {
+            entry_stage: {} for entry_stage in ModuleStage
+        }
+        self._pipeline_stage_ranges = {}
         self._teardown_session_temp_root()
         self.logger.info("Application core shutdown", extra={"component": "AppCore"})
         self._bootstrapped = False
@@ -348,15 +358,43 @@ class AppCore:
             )
         return self._pipeline_cache
 
+    def get_pipeline_manager(self) -> PipelineManager:
+        """Return the unified pipeline manager spanning all module stages."""
+
+        if self._pipeline_manager is None:
+            manager, templates, ranges = self._build_pipeline_manager()
+            self._pipeline_manager = manager
+            self._pipeline_stage_templates = templates
+            self._pipeline_stage_ranges = ranges
+            self._preprocessing_templates = templates.get(
+                ModuleStage.PREPROCESSING, {}
+            )
+            # Invalidate stage specific clones so they can be rebuilt from the
+            # refreshed templates on demand.
+            self._preprocessing_manager = None
+        return self._pipeline_manager
+
+    def pipeline_stage_bounds(self, stage: ModuleStage) -> Tuple[int, int]:
+        """Return the start/end indices for ``stage`` within the unified pipeline."""
+
+        self.get_pipeline_manager()
+        return self._pipeline_stage_ranges.get(stage, (0, 0))
+
+    def pipeline_stage_templates(self, stage: ModuleStage) -> Dict[str, PipelineStep]:
+        """Return the cached step templates for ``stage``."""
+
+        self.get_pipeline_manager()
+        return self._pipeline_stage_templates.get(stage, {})
+
     def get_preprocessing_pipeline_manager(self) -> PipelineManager:
         if self._preprocessing_manager is None:
-            templates: Dict[str, PipelineStep] = {}
-            for module in self.iter_enabled_modules(ModuleStage.PREPROCESSING):
-                step = module.create_pipeline_step()
-                templates[step.name] = step
-            self._preprocessing_templates = templates
+            self.get_pipeline_manager()
+            templates = self._pipeline_stage_templates.get(ModuleStage.PREPROCESSING, {})
+            self._preprocessing_templates = {
+                name: step.clone() for name, step in templates.items()
+            }
             self._preprocessing_manager = PipelineManager(
-                templates.values(),
+                (step.clone() for step in templates.values()),
                 cache_dir=self.session_pipeline_cache_dir,
                 recovery_root=self.session_recovery_dir,
             )
@@ -389,6 +427,42 @@ class AppCore:
 
     # ------------------------------------------------------------------
     # Internal helpers
+    def _build_pipeline_manager(
+        self,
+    ) -> Tuple[PipelineManager, Dict[ModuleStage, Dict[str, PipelineStep]], Dict[ModuleStage, Tuple[int, int]]]:
+        steps: List[PipelineStep] = []
+        templates: Dict[ModuleStage, Dict[str, PipelineStep]] = {}
+        ranges: Dict[ModuleStage, Tuple[int, int]] = {}
+
+        for stage in ModuleStage:
+            stage_modules = sorted(
+                self.iter_enabled_modules(stage), key=self._module_sort_key
+            )
+            stage_steps = [
+                self._coerce_stage_step(module, stage) for module in stage_modules
+            ]
+            templates[stage] = {step.name: step.clone() for step in stage_steps}
+            start = len(steps)
+            steps.extend(step.clone() for step in stage_steps)
+            ranges[stage] = (start, len(steps))
+
+        manager = PipelineManager(
+            steps,
+            cache_dir=self.session_pipeline_cache_dir,
+            recovery_root=self.session_recovery_dir,
+        )
+        return manager, templates, ranges
+
+    def _coerce_stage_step(self, module: ModuleBase, stage: ModuleStage) -> PipelineStep:
+        step = module.create_pipeline_step()
+        step.stage = stage
+        return step
+
+    def _module_sort_key(self, module: ModuleBase) -> Tuple[Any, ...]:
+        metadata = module.metadata
+        menu_path = tuple(str(part).lower() for part in metadata.menu_path)
+        return (*menu_path, metadata.title.lower(), metadata.identifier.lower())
+
     def _configure_logging(self) -> None:
         self._log_handler = init_logging(
             diagnostics_enabled=self.config.diagnostics_enabled,
@@ -710,6 +784,13 @@ class AppCore:
                 "stage": metadata.stage.value,
             },
         )
+        self._pipeline_manager = None
+        self._pipeline_stage_templates = {
+            entry_stage: {} for entry_stage in ModuleStage
+        }
+        self._pipeline_stage_ranges = {}
+        self._preprocessing_manager = None
+        self._preprocessing_templates = {}
 
     def _module_settings_key(self, stage: ModuleStage, identifier: str) -> str:
         return f"modules/{stage.value}/{identifier}/enabled"
@@ -789,9 +870,13 @@ class AppCore:
         if previous == enabled:
             return
 
-        if stage is ModuleStage.PREPROCESSING:
-            self._preprocessing_manager = None
-            self._preprocessing_templates = {}
+        self._pipeline_manager = None
+        self._pipeline_stage_templates = {
+            entry_stage: {} for entry_stage in ModuleStage
+        }
+        self._pipeline_stage_ranges = {}
+        self._preprocessing_manager = None
+        self._preprocessing_templates = {}
 
     # ------------------------------------------------------------------
     # Diagnostics helpers
